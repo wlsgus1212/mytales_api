@@ -4,10 +4,10 @@ import openai
 import os
 import json
 
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
-
-openai.api_key = os.environ.get("OPENAI_API_KEY")
 
 @app.route("/", methods=["GET"])
 def root():
@@ -60,9 +60,12 @@ def analyze():
 
         try:
             structured = json.loads(result_text)
-            return jsonify(structured)
-        except json.JSONDecodeError as parse_err:
-            return jsonify({"error": "GPT 응답 파싱 실패", "raw": result_text}), 500
+            return jsonify({"result": structured})
+        except json.JSONDecodeError:
+            return jsonify({
+                "error": "GPT 응답을 JSON으로 파싱할 수 없습니다.",
+                "raw": result_text
+            }), 500
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
