@@ -3,9 +3,6 @@ from flask_cors import CORS
 import openai
 import json
 
-# 너가 보낸 실제 API 키 사용
-openai.api_key = "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"
-
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -16,7 +13,6 @@ def root():
 @app.route("/analyze", methods=["POST"])
 def analyze():
     data = request.get_json()
-
     answers = data.get("answers", [])
     education_goal = data.get("education_goal", "")
 
@@ -36,7 +32,7 @@ def analyze():
 4. why_story_works: 동화로 전달하면 좋은 이유
 5. story_direction: 동화가 어떤 방향으로 구성되면 좋을지 요약
 
-결과는 다음 JSON 형식으로 출력해주세요:
+반드시 JSON 형식으로만 출력해주세요. 예시는 다음과 같습니다:
 {{
   "character_name": "...",
   "character_summary": "...",
@@ -56,8 +52,16 @@ def analyze():
             temperature=0.7
         )
 
-        result_text = response.choices[0].message.content
-        structured = json.loads(result_text)
+        result_text = response.choices[0].message.content.strip()
+        print("GPT 응답 원문:", result_text)
+
+        try:
+            structured = json.loads(result_text)
+        except json.JSONDecodeError:
+            return jsonify({
+                "error": "GPT 응답이 JSON 형식이 아닙니다",
+                "raw": result_text
+            }), 500
 
         return jsonify({"result": structured})
 
