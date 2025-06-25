@@ -4,7 +4,6 @@ import openai
 import json
 import os
 
-# ✅ Render에선 .env 불필요 → 환경변수 직접 참조
 openai.api_key = os.environ["OPENAI_API_KEY"]
 
 app = Flask(__name__)
@@ -68,4 +67,3 @@ def analyze():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
-
