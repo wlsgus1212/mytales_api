@@ -7,14 +7,19 @@ import os
 openai.api_key = os.environ["OPENAI_API_KEY"]
 
 app = Flask(__name__)
-CORS(app)
+
+# ✅ CORS 설정 강화
+CORS(app, resources={r"/analyze": {"origins": "*"}}, allow_headers="*", supports_credentials=True)
 
 @app.route("/", methods=["GET"])
 def root():
     return "MyTales Flask API is running."
 
-@app.route("/analyze", methods=["POST"])
+@app.route("/analyze", methods=["POST", "OPTIONS"])
 def analyze():
+    if request.method == "OPTIONS":
+        return '', 204
+
     data = request.get_json()
 
     name = data.get("name", "")
@@ -57,9 +62,7 @@ def analyze():
         )
 
         result_text = response.choices[0].message.content.strip()
-        result_text = result_text.encode("utf-8").decode("utf-8")
-        structured = json.loads(result_text)
-
+        structured = json.loads(result_text.encode("utf-8").decode("utf-8"))
         return jsonify({"result": structured})
 
     except Exception as e:
@@ -67,3 +70,4 @@ def analyze():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
