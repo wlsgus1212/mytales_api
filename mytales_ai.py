@@ -1,30 +1,22 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import openai
-import json
 import os
+import json
 
-# 🔐 환경 변수에서 OpenAI API 키 불러오기
 openai.api_key = os.environ["OPENAI_API_KEY"]
 
 app = Flask(__name__)
-
-# ✅ CORS 전체 허용
-CORS(app, resources={r"/*": {"origins": "*"}}, allow_headers="*", supports_credentials=True)
+CORS(app)
 
 
-# ✅ 루트 헬스체크
 @app.route("/", methods=["GET"])
 def root():
     return "MyTales Flask API is running."
 
 
-# ✅ 분석 요청 (GPT-4 기반)
-@app.route("/analyze", methods=["POST", "OPTIONS"])
+@app.route("/analyze", methods=["POST"])
 def analyze():
-    if request.method == "OPTIONS":
-        return '', 204
-
     data = request.get_json()
 
     name = data.get("name", "")
@@ -48,8 +40,7 @@ def analyze():
   "character_analysis": "성향 분석 결과 (10문장 이상, 부모가 응답했음을 반영)",
   "why_story_works": "왜 동화로 전달하는 것이 효과적인지 설명",
   "story_direction": "어떤 방향으로 동화를 구성하면 좋은지",
-  "storybook_sample": "동화 본문 예시 (10문장 내외, 아이의 성별과 나이를 반영)",
-  "character_image_description": "동화 주인공을 이미지로 표현한 설명 (Midjourney나 DALL·E 프롬프트로 사용할 수 있도록)"
+  "storybook_sample": "동화 본문 예시 (10문장 내외, 아이의 성별과 나이를 반영)"
 }}
 
 심리 테스트 응답: {answers}
@@ -68,30 +59,34 @@ def analyze():
         )
 
         result_text = response.choices[0].message.content.strip()
-        structured = json.loads(result_text.encode("utf-8").decode("utf-8"))
+        structured = json.loads(result_text)
         return jsonify({"result": structured})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-# ✅ 이미지 생성 요청 (DALL·E 3 API)
 @app.route("/generate-image", methods=["POST"])
 def generate_image():
     data = request.get_json()
     prompt = data.get("prompt", "")
 
     if not prompt:
-        return jsonify({"error": "이미지 프롬프트가 필요합니다."}), 400
+        return jsonify({"error": "이미지 생성에 필요한 프롬프트가 없습니다."}), 400
 
     try:
         response = openai.Image.create(
-            prompt=prompt,
             model="dall-e-3",
+            prompt=prompt,
             size="1024x1024",
             response_format="url"
         )
-
         image_url = response["data"][0]["url"]
-        retur
+        return jsonify({"image_url": image_url})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
 
