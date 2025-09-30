@@ -4,7 +4,8 @@ import openai
 import os
 import json
 
-openai.api_key = os.environ["OPENAI_API_KEY"]
+# ✅ 환경 변수에서 OpenAI API 키 가져오기
+openai.api_key = os.environ["sk-proj-EfehanBccXc5jivKsSzx3Y0xDX07hMeg4OboUYA_zYAFZoCA3CSZen7q9rLfBVsXDFRlxJy4wkT3BlbkFJcN-puU4r1Ts2KOXcJVNrG2LZYEXnocpM2CwfzusD548kkntgZdMYGmLz1HQLM7e5C21SjMgQsAY"]
 
 app = Flask(__name__)
 CORS(app)
@@ -15,6 +16,72 @@ def root():
     return "MyTales Flask API is running."
 
 
+# ✅ [1] 무료 동화 생성용 API (슬라이드 6장용)
+@app.route("/generate-story", methods=["POST"])
+def generate_story():
+    data = request.get_json()
+
+    name = data.get("name", "")
+    age = data.get("age", "")
+    gender = data.get("gender", "")
+    education_goal = data.get("education_goal", "")
+
+    if not all([name, age, gender, education_goal]):
+        return jsonify({"error": "모든 항목을 입력해주세요."}), 400
+
+    # 🔮 GPT 프롬프트 구성
+    prompt = f"""
+아이의 이름은 {name}, 나이는 {age}세, 성별은 {gender}입니다.
+부모가 훈육하고 싶은 주제는 "{education_goal}"입니다.
+
+이 아이에게 적합한 맞춤형 동화를 만들어 주세요.
+총 6개의 문단으로 나눠주세요. 각각의 문단은 한 장면(슬라이드)에 해당하며, 각 문단은 3~4문장으로 구성해주세요.
+각 문단은 삽화를 생성할 수 있도록 구체적인 장면 묘사를 포함해주세요.
+
+JSON 배열 형식으로 다음과 같이 출력해 주세요:
+
+[
+  "첫 번째 문단 텍스트",
+  "두 번째 문단 텍스트",
+  ...
+  "여섯 번째 문단 텍스트"
+]
+"""
+
+    try:
+        # ✅ 1. 동화 텍스트 생성 (GPT-4)
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "너는 유아 맞춤 동화 작가야."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7
+        )
+
+        text_list = json.loads(response.choices[0].message.content.strip())
+
+        # ✅ 2. 삽화 이미지 생성 (DALL·E)
+        image_urls = []
+        for text in text_list:
+            image_response = openai.Image.create(
+                model="dall-e-3",
+                prompt=text,
+                size="1024x1024",
+                response_format="url"
+            )
+            image_urls.append(image_response["data"][0]["url"])
+
+        return jsonify({
+            "texts": text_list,
+            "images": image_urls
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ✅ [2] 심리검사 분석용 API
 @app.route("/analyze", methods=["POST"])
 def analyze():
     data = request.get_json()
@@ -66,6 +133,7 @@ def analyze():
         return jsonify({"error": str(e)}), 500
 
 
+# ✅ [3] 이미지 단독 생성 API
 @app.route("/generate-image", methods=["POST"])
 def generate_image():
     data = request.get_json()
@@ -83,10 +151,11 @@ def generate_image():
         )
         image_url = response["data"][0]["url"]
         return jsonify({"image_url": image_url})
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
+# ✅ 서버 실행
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
-
