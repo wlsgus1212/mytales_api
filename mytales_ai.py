@@ -3,9 +3,11 @@ from flask_cors import CORS
 import openai
 import os
 import json
+from dotenv import load_dotenv
 
-# ✅ 환경 변수에서 OpenAI API 키 가져오기
-openai.api_key = os.environ["sk-proj-EfehanBccXc5jivKsSzx3Y0xDX07hMeg4OboUYA_zYAFZoCA3CSZen7q9rLfBVsXDFRlxJy4wkT3BlbkFJcN-puU4r1Ts2KOXcJVNrG2LZYEXnocpM2CwfzusD548kkntgZdMYGmLz1HQLM7e5C21SjMgQsAY"]
+# ✅ 환경 변수 로드
+load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = Flask(__name__)
 CORS(app)
