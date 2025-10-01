@@ -1,13 +1,13 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import openai
 import os
 import json
 from dotenv import load_dotenv
+from openai import OpenAI
 
 # ✅ 환경 변수 로드
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = Flask(__name__)
 CORS(app)
@@ -18,7 +18,7 @@ def root():
     return "MyTales Flask API is running."
 
 
-# ✅ [1] 무료 동화 생성용 API (슬라이드 6장용)
+# ✅ [1] 무료 동화 생성 API (6 슬라이드)
 @app.route("/generate-story", methods=["POST"])
 def generate_story():
     data = request.get_json()
@@ -31,7 +31,7 @@ def generate_story():
     if not all([name, age, gender, education_goal]):
         return jsonify({"error": "모든 항목을 입력해주세요."}), 400
 
-    # 🔮 GPT 프롬프트 구성
+    # 🔮 프롬프트
     prompt = f"""
 아이의 이름은 {name}, 나이는 {age}세, 성별은 {gender}입니다.
 부모가 훈육하고 싶은 주제는 "{education_goal}"입니다.
@@ -51,9 +51,9 @@ JSON 배열 형식으로 다음과 같이 출력해 주세요:
 """
 
     try:
-        # ✅ 1. 동화 텍스트 생성 (GPT-4)
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
+        # ✅ 1. 동화 텍스트 생성
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "너는 유아 맞춤 동화 작가야."},
                 {"role": "user", "content": prompt}
@@ -63,16 +63,15 @@ JSON 배열 형식으로 다음과 같이 출력해 주세요:
 
         text_list = json.loads(response.choices[0].message.content.strip())
 
-        # ✅ 2. 삽화 이미지 생성 (DALL·E)
+        # ✅ 2. 이미지 생성
         image_urls = []
         for text in text_list:
-            image_response = openai.Image.create(
-                model="dall-e-3",
+            image_response = client.images.generate(
+                model="gpt-image-1",
                 prompt=text,
-                size="1024x1024",
-                response_format="url"
+                size="1024x1024"
             )
-            image_urls.append(image_response["data"][0]["url"])
+            image_urls.append(image_response.data[0].url)
 
         return jsonify({
             "texts": text_list,
@@ -83,7 +82,7 @@ JSON 배열 형식으로 다음과 같이 출력해 주세요:
         return jsonify({"error": str(e)}), 500
 
 
-# ✅ [2] 심리검사 분석용 API
+# ✅ [2] 심리검사 분석 API
 @app.route("/analyze", methods=["POST"])
 def analyze():
     data = request.get_json()
@@ -118,8 +117,8 @@ def analyze():
 """
 
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "너는 유아 심리 분석과 맞춤형 동화 제작 전문가야."},
                 {"role": "user", "content": prompt}
@@ -145,13 +144,12 @@ def generate_image():
         return jsonify({"error": "이미지 생성에 필요한 프롬프트가 없습니다."}), 400
 
     try:
-        response = openai.Image.create(
-            model="dall-e-3",
+        response = client.images.generate(
+            model="gpt-image-1",
             prompt=prompt,
-            size="1024x1024",
-            response_format="url"
+            size="1024x1024"
         )
-        image_url = response["data"][0]["url"]
+        image_url = response.data[0].url
         return jsonify({"image_url": image_url})
 
     except Exception as e:
