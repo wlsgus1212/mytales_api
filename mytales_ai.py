@@ -14,7 +14,7 @@ if not API_KEY:
 client = OpenAI(api_key=API_KEY)
 
 # 이미지 생성 기본 on/off 및 디버그 노출 플래그(환경변수로 제어)
-IMAGES_ENABLED = os.getenv("IMAGES_ENABLED", "true").lower() in ("1", "true", "yes")
+IMAGES_ENABLED = os.getenv("IMAGES_ENABLED", "false").lower() in ("1", "true", "yes")
 DEBUG_RETURN_IMAGE_ERRORS = os.getenv("DEBUG_RETURN_IMAGE_ERRORS", "false").lower() in ("1", "true", "yes")
 
 app = Flask(__name__)
@@ -24,7 +24,6 @@ log = logging.getLogger("mytales")
 
 # ── 유틸 ──────────────────────────────────────────────────────────────────────
 def _extract_json_block(s: str) -> str:
-    """모델이 코드펜스/잡텍스트를 섞어 보낼 때 JSON 블록만 추출."""
     if not isinstance(s, str):
         raise ValueError("model content is not string")
     m = re.search(r"```(?:json)?\s*(\[[\s\S]*?\]|\{[\s\S]*?\})\s*```", s, re.I)
@@ -37,7 +36,6 @@ def _extract_json_block(s: str) -> str:
     return s
 
 def loads_json_array_only(s: str):
-    """배열 또는 {"story_paragraphs":[...]} 형태만 허용해 리스트로 반환."""
     try:
         v = json.loads(s)
         if isinstance(v, list):
@@ -52,7 +50,6 @@ def loads_json_array_only(s: str):
     raise ValueError("model did not return JSON array")
 
 def _fix_name_placeholders(text: str, name: str) -> str:
-    """모델이 남기는 플레이스홀더 치환."""
     return (text
             .replace("아동 이름", name)
             .replace("아이 이름", name)
@@ -61,7 +58,6 @@ def _fix_name_placeholders(text: str, name: str) -> str:
             .replace("{{이름}}", name))
 
 def _normalize_to_six_paragraphs(paragraphs, name: str, age: int) -> list:
-    """단일 문자열 또는 6개 미만 리스트를 6문단으로 보정."""
     if isinstance(paragraphs, str):
         parts = [p.strip() for p in re.split(r"[\.!?]\s+", paragraphs) if p.strip()]
         if not parts:
@@ -79,8 +75,19 @@ def _normalize_to_six_paragraphs(paragraphs, name: str, age: int) -> list:
     while len(paragraphs) < 6:
         paragraphs.append(f"{name}와 친구들이 서로 돕고 배려하며 문제를 해결하는 장면이다.")
 
-    # 이름 치환 및 최소 1회 등장 보장
     paragraphs = [_fix_name_placeholders(p, name) for p in paragraphs]
+
+    NAME_TOKEN = re.compile(r"([가-힣]{2,3})(?=(?:이|가|는|를|을|와|과|에게|한테|의|야|아|여|이라|라고))")
+    STOPWORDS = {"친구", "아이", "엄마", "아빠", "선생님", "형", "누나", "동생"}
+    fixed = []
+    for p in paragraphs:
+        cands = {m.group(1) for m in NAME_TOKEN.finditer(p)}
+        for cand in cands:
+            if cand != name and cand not in STOPWORDS:
+                p = re.sub(fr"(?<![가-힣]){cand}(?![가-힣])", name, p)
+        fixed.append(p)
+    paragraphs = fixed
+
     if not any(name in p for p in paragraphs):
         paragraphs[0] = f"{name}는 {age}살로, 친구들과 어울리길 좋아해요. " + paragraphs[0]
     return paragraphs
@@ -96,13 +103,11 @@ def healthz():
 
 @app.post("/generate-story")
 def generate_story():
-    # 쿼리 토글
     q_images = request.args.get("images")
     images_enabled = IMAGES_ENABLED if q_images is None else (q_images.lower() in ("1", "true", "yes"))
     debug = request.args.get("debug", "0") in ("1", "true", "yes")
     mock = request.args.get("mock", "0") in ("1", "true", "yes")
 
-    # 입력 파싱
     try:
         data = request.get_json(force=True, silent=False)
     except Exception:
@@ -119,7 +124,6 @@ def generate_story():
     if not all([name, age, gender, goal]):
         return jsonify({"error": "모든 항목을 입력해주세요."}), 400
 
-    # MOCK 모드: OpenAI 우회해 서버/네트워크 문제 분리
     if mock:
         paragraphs = [
             f"{name}는 놀이터에서 친구들과 모래성을 시작했어요. 모두가 각자 할 일을 정했죠.",
@@ -131,13 +135,12 @@ def generate_story():
         ]
         return jsonify({"texts": paragraphs, "images": ["", "", "", "", "", ""]}), 200
 
-    # OpenAI 텍스트 생성
     system = "You are a JSON generator. Output ONLY valid JSON with no extra text."
     user_prompt = (
         f"아동 이름={name}, 나이={age}, 성별={gender}. 훈육 주제=\"{goal}\".\n"
         "유치원생이 이해할 쉬운 어휘로 6개 문단 동화를 생성하라.\n"
         "각 문단은 3~4문장. 각 문단에 삽화용 장면 묘사를 포함한다.\n"
-        "본문에는 아동의 이름을 일관되게 사용한다.\n"
+        f"주인공 이름은 오직 '{name}'만 사용하고, 다른 인명은 절대 쓰지 말라.\n"
         "다음 중 하나의 형식만 출력:\n"
         "A) [\"문단1\", ... , \"문단6\"]\n"
         "B) {\"story_paragraphs\": [\"문단1\", ... , \"문단6\"]}\n"
@@ -146,7 +149,7 @@ def generate_story():
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
-            response_format={"type": "json_object"},  # JSON 강제
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_prompt}
@@ -171,7 +174,6 @@ def generate_story():
         log.error("Text generation failed: %s", traceback.format_exc())
         return jsonify({"error": "gpt_text_generation_failed", "message": str(e)}), 500
 
-    # 이미지 생성(옵션)
     image_urls, image_errors = [], []
     if images_enabled:
         for i, para in enumerate(paragraphs, 1):
@@ -204,5 +206,5 @@ def generate_story():
 
 # ── 엔트리포인트 ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))  # Render는 동적 $PORT 사용
+    port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
