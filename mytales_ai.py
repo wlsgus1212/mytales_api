@@ -4,6 +4,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import os
 import json
+import traceback
 
 # 환경 변수 로드
 load_dotenv()
@@ -12,9 +13,11 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 app = Flask(__name__)
 CORS(app)
 
+
 @app.route("/", methods=["GET"])
 def root():
     return "MyTales Flask API is running."
+
 
 # 무료 동화 생성 API
 @app.route("/generate-story", methods=["POST"])
@@ -58,22 +61,37 @@ def generate_story():
             temperature=0.7
         )
 
-        text_list = json.loads(response.choices[0].message.content.strip())
+        gpt_output = response.choices[0].message.content.strip()
+        print("🔍 GPT 응답 원문:", gpt_output)
+
+        # JSON 파싱 시도
+        try:
+            text_list = json.loads(gpt_output)
+        except Exception:
+            print("❌ JSON 파싱 실패, 원문 그대로 반환")
+            return jsonify({"error": "GPT 응답 파싱 실패", "raw": gpt_output}), 500
 
         # DALL·E 이미지 생성
         image_urls = []
-        for text in text_list:
-            image_response = client.images.generate(
-                model="gpt-image-1",
-                prompt=text,
-                size="1024x1024"
-            )
-            image_urls.append(image_response.data[0].url)
+        for idx, text in enumerate(text_list, start=1):
+            try:
+                image_response = client.images.generate(
+                    model="gpt-image-1",
+                    prompt=text,
+                    size="1024x1024"
+                )
+                image_url = image_response.data[0].url
+                image_urls.append(image_url)
+            except Exception as img_err:
+                print(f"❌ 이미지 생성 실패 (슬라이드 {idx}):", img_err)
+                image_urls.append("")
 
         return jsonify({"texts": text_list, "images": image_urls})
 
     except Exception as e:
+        print("❌ 서버 내부 오류:", traceback.format_exc())
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
