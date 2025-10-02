@@ -2,96 +2,146 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-import os
-import json
-import traceback
+import os, json, re, traceback, logging
 
-# 환경 변수 로드
+# ── 기본 설정 ─────────────────────────────────────────────────────────────────
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+API_KEY = os.getenv("OPENAI_API_KEY")
+if not API_KEY:
+    raise RuntimeError("OPENAI_API_KEY not set")
+
+client = OpenAI(api_key=API_KEY)
 
 app = Flask(__name__)
 CORS(app)
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("mytales")
 
+# ── 유틸: JSON 안전 파싱 ───────────────────────────────────────────────────────
+def _extract_json_block(s: str) -> str:
+    if not isinstance(s, str):
+        raise ValueError("model content is not string")
+    m = re.search(r"```(?:json)?\s*(\[[\s\S]*?\]|\{[\s\S]*?\})\s*```", s, re.I)
+    if m:
+        return m.group(1)
+    # 가장 바깥 대괄호/중괄호 추출 시도
+    starts = [(i, "[") for i, c in enumerate(s) if c == "["] + [(i, "{") for i, c in enumerate(s) if c == "{"]
+    ends   = [(i, "]") for i, c in enumerate(s) if c == "]"] + [(i, "}") for i, c in enumerate(s) if c == "}"]
+    if starts and ends:
+        L = min(starts)[0]
+        R = max(ends)[0]
+        if L < R:
+            return s[L:R+1]
+    return s
 
-@app.route("/", methods=["GET"])
+def loads_json_array_only(s: str):
+    try:
+        v = json.loads(s)
+        if isinstance(v, list):
+            return v
+    except Exception:
+        pass
+    s2 = _extract_json_block(s)
+    v2 = json.loads(s2)
+    if isinstance(v2, list):
+        return v2
+    # { "story_paragraphs": [...] } 형태 지원
+    if isinstance(v2, dict) and "story_paragraphs" in v2 and isinstance(v2["story_paragraphs"], list):
+        return v2["story_paragraphs"]
+    raise ValueError("model did not return JSON array")
+
+# ── 라우트 ────────────────────────────────────────────────────────────────────
+@app.get("/")
 def root():
     return "MyTales Flask API is running."
 
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}, 200
 
-# 무료 동화 생성 API
-@app.route("/generate-story", methods=["POST"])
+@app.post("/generate-story")
 def generate_story():
-    data = request.get_json()
-    name = data.get("name", "")
+    try:
+        data = request.get_json(force=True, silent=False)
+    except Exception:
+        return jsonify({"error": "invalid_json"}), 400
+
+    name = str(data.get("name", "")).strip()
     age = data.get("age", "")
-    gender = data.get("gender", "")
-    education_goal = data.get("education_goal", "")
+    gender = str(data.get("gender", "")).strip()
+    education_goal = str(data.get("education_goal", "")).strip()
+
+    try:
+        age = int(age)
+    except Exception:
+        return jsonify({"error": "age must be integer"}), 400
 
     if not all([name, age, gender, education_goal]):
         return jsonify({"error": "모든 항목을 입력해주세요."}), 400
 
-    prompt = f"""
-    아이의 이름은 {name}, 나이는 {age}세, 성별은 {gender}입니다.
-    부모가 훈육하고 싶은 주제는 "{education_goal}"입니다.
-
-    이 아이에게 적합한 맞춤형 동화를 만들어 주세요.
-    총 6개의 문단으로 나눠주세요. 각각의 문단은 한 장면(슬라이드)에 해당하며, 각 문단은 3~4문장으로 구성해주세요.
-    각 문단은 삽화를 생성할 수 있도록 구체적인 장면 묘사를 포함해주세요.
-
-    JSON 배열 형식으로 출력:
-    [
-      "첫 번째 문단",
-      "두 번째 문단",
-      "세 번째 문단",
-      "네 번째 문단",
-      "다섯 번째 문단",
-      "여섯 번째 문단"
-    ]
-    """
+    # 프롬프트와 JSON 강제
+    system = "You are a JSON generator. Output ONLY valid JSON with no extra text."
+    user_prompt = (
+        f"아이 이름={name}, 나이={age}, 성별={gender}. 훈육 주제=\"{education_goal}\".\n"
+        "유치원생이 이해할 쉬운 어휘로 6개 문단 동화 생성.\n"
+        "각 문단은 3~4문장. 각 문단엔 삽화 생성용 장면 묘사를 포함.\n"
+        "반드시 아래 중 하나의 형식만 출력:\n"
+        "A) 순수 JSON 배열: [\"문단1\", ... , \"문단6\"]\n"
+        "B) JSON 객체: {\"story_paragraphs\": [\"문단1\", ... , \"문단6\"]}\n"
+    )
 
     try:
-        # GPT 호출 (최신 SDK)
-        response = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model="gpt-4o-mini",
+            response_format={"type": "json_object"},  # 객체 강제. 배열만 나올 수 없을 때 대비.
             messages=[
-                {"role": "system", "content": "너는 유아 맞춤 동화 작가야."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_prompt}
             ],
-            temperature=0.7
+            temperature=0.7,
+            timeout=60
         )
+        content = resp.choices[0].message.content or ""
+        log.info("OpenAI raw: %s", content[:500])
 
-        gpt_output = response.choices[0].message.content.strip()
-        print("🔍 GPT 응답 원문:", gpt_output)
-
-        # JSON 파싱 시도
+        # 객체 강제 때문에 보통 {"story_paragraphs":[...]}로 옴. 파서가 배열/객체 모두 허용.
         try:
-            text_list = json.loads(gpt_output)
+            paragraphs = loads_json_array_only(content)
         except Exception:
-            print("❌ JSON 파싱 실패, 원문 그대로 반환")
-            return jsonify({"error": "GPT 응답 파싱 실패", "raw": gpt_output}), 500
+            # 객체 강제 케이스 직접 파싱
+            obj = json.loads(content)
+            paragraphs = obj.get("story_paragraphs", [])
+            if not isinstance(paragraphs, list):
+                raise ValueError("story_paragraphs missing or not a list")
 
-        # DALL·E 이미지 생성
-        image_urls = []
-        for idx, text in enumerate(text_list, start=1):
-            try:
-                image_response = client.images.generate(
-                    model="gpt-image-1",
-                    prompt=text,
-                    size="1024x1024"
-                )
-                image_url = image_response.data[0].url
-                image_urls.append(image_url)
-            except Exception as img_err:
-                print(f"❌ 이미지 생성 실패 (슬라이드 {idx}):", img_err)
-                image_urls.append("")
-
-        return jsonify({"texts": text_list, "images": image_urls})
+        paragraphs = [str(p).strip() for p in paragraphs][:6]
+        if len(paragraphs) < 6:
+            # 부족하면 컷 대신 남은 문단을 간단 문장으로 채움
+            while len(paragraphs) < 6:
+                paragraphs.append("이 장면은 아이와 친구들이 협력하며 문제를 해결하는 모습을 간단히 보여준다.")
 
     except Exception as e:
-        print("❌ 서버 내부 오류:", traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        log.error("Text generation failed: %s", traceback.format_exc())
+        return jsonify({"error": "gpt_text_generation_failed", "message": str(e)}), 500
 
+    # 이미지 생성은 실패해도 텍스트는 반환
+    image_urls = []
+    for i, para in enumerate(paragraphs, 1):
+        try:
+            img = client.images.generate(
+                model="gpt-image-1",
+                prompt=f"{para}\n\nStyle: watercolor, children's picture book, soft lighting, consistent characters.",
+                size="1024x1024"
+            )
+            image_urls.append(img.data[0].url)
+        except Exception as e:
+            log.warning("image gen failed on slide %d: %s", i, e)
+            image_urls.append("")
 
+    return jsonify({"texts": paragraphs, "images": image_urls}), 200
+
+# ── 엔트리 포인트 ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    # Render는 동적으로 부여한 $PORT 사용. 10000 하드코딩 금지.
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
