@@ -13,7 +13,7 @@ if not API_KEY:
 
 client = OpenAI(api_key=API_KEY)
 
-# 이미지 생성 기본 on/off 및 디버그 노출 플래그(환경변수로 제어)
+# 이미지 생성 on/off 및 디버그 노출(환경변수)
 IMAGES_ENABLED = os.getenv("IMAGES_ENABLED", "false").lower() in ("1", "true", "yes")
 DEBUG_RETURN_IMAGE_ERRORS = os.getenv("DEBUG_RETURN_IMAGE_ERRORS", "false").lower() in ("1", "true", "yes")
 
@@ -50,12 +50,18 @@ def loads_json_array_only(s: str):
     raise ValueError("model did not return JSON array")
 
 def _fix_name_placeholders(text: str, name: str) -> str:
-    return (text
-            .replace("아동 이름", name)
-            .replace("아이 이름", name)
-            .replace("아동의 이름", name)
-            .replace("{이름}", name)
-            .replace("{{이름}}", name))
+    # 일반 플레이스홀더
+    t = (text
+         .replace("아동 이름", name)
+         .replace("아이 이름", name)
+         .replace("아동의 이름", name)
+         .replace("{이름}", name)
+         .replace("{{이름}}", name))
+    # 물음표 마스킹(따옴표 포함) → 이름
+    t = re.sub(r"[\"'“”‘’]?\?{2,}[\"'“”‘’]?", name, t)
+    # 특수문자 대체(유니코드 물음표/깨진 문자)
+    t = t.replace("�", name)
+    return t
 
 def _normalize_to_six_paragraphs(paragraphs, name: str, age: int) -> list:
     if isinstance(paragraphs, str):
@@ -70,13 +76,14 @@ def _normalize_to_six_paragraphs(paragraphs, name: str, age: int) -> list:
             grouped.append(grp if grp.endswith((".", "!", "?")) else (grp + "."))
         paragraphs = grouped
 
-    paragraphs = [str(p).strip() for p in paragraphs]
-    paragraphs = paragraphs[:6]
+    paragraphs = [str(p).strip() for p in paragraphs][:6]
     while len(paragraphs) < 6:
         paragraphs.append(f"{name}와 친구들이 서로 돕고 배려하며 문제를 해결하는 장면이다.")
 
+    # 이름 치환
     paragraphs = [_fix_name_placeholders(p, name) for p in paragraphs]
 
+    # 다른 한글 인명을 name으로 정규화
     NAME_TOKEN = re.compile(r"([가-힣]{2,3})(?=(?:이|가|는|를|을|와|과|에게|한테|의|야|아|여|이라|라고))")
     STOPWORDS = {"친구", "아이", "엄마", "아빠", "선생님", "형", "누나", "동생"}
     fixed = []
@@ -135,12 +142,14 @@ def generate_story():
         ]
         return jsonify({"texts": paragraphs, "images": ["", "", "", "", "", ""]}), 200
 
+    # 프롬프트: 이름 가리기 금지, 매 문단에 이름 사용 권고
     system = "You are a JSON generator. Output ONLY valid JSON with no extra text."
     user_prompt = (
         f"아동 이름={name}, 나이={age}, 성별={gender}. 훈육 주제=\"{goal}\".\n"
         "유치원생이 이해할 쉬운 어휘로 6개 문단 동화를 생성하라.\n"
         "각 문단은 3~4문장. 각 문단에 삽화용 장면 묘사를 포함한다.\n"
-        f"주인공 이름은 오직 '{name}'만 사용하고, 다른 인명은 절대 쓰지 말라.\n"
+        f"주인공 이름은 반드시 정확히 '{name}'만 사용하라. 물음표(??), 별표(**), 이니셜 등으로 가리거나 변형하지 말라.\n"
+        "가능하면 매 문단에 주인공 이름이 한 번 이상 등장하도록 하라.\n"
         "다음 중 하나의 형식만 출력:\n"
         "A) [\"문단1\", ... , \"문단6\"]\n"
         "B) {\"story_paragraphs\": [\"문단1\", ... , \"문단6\"]}\n"
@@ -174,6 +183,7 @@ def generate_story():
         log.error("Text generation failed: %s", traceback.format_exc())
         return jsonify({"error": "gpt_text_generation_failed", "message": str(e)}), 500
 
+    # 이미지 생성(옵션)
     image_urls, image_errors = [], []
     if images_enabled:
         for i, para in enumerate(paragraphs, 1):
