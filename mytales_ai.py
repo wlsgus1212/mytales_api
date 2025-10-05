@@ -67,7 +67,7 @@ def generate_story():
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
-            max_tokens=800
+            max_tokens=1000
         )
 
         content = response.choices[0].message.content.strip()
@@ -81,7 +81,6 @@ def generate_story():
         if not isinstance(paragraphs, list):
             paragraphs = [content]
 
-        # 이름 치환
         paragraphs = [p.replace("??", name) for p in paragraphs]
 
         return jsonify({"texts": paragraphs}), 200
@@ -91,7 +90,7 @@ def generate_story():
         return jsonify({"error": str(e)}), 500
 
 # ────────────────────────────────────────────────
-# 4️⃣ /generate-image : 단일 이미지 생성
+# 4️⃣ /generate-image : 단일 이미지 생성 (경량화)
 # ────────────────────────────────────────────────
 @app.post("/generate-image")
 def generate_image():
@@ -103,12 +102,18 @@ def generate_image():
             return jsonify({"error": "prompt is required"}), 400
 
         result = client.images.generate(
-            model="gpt-image-1",
+            model="dall-e-2",        # ⬅️ 경량 모델 사용
             prompt=prompt,
-            size="1024x1024"
+            size="512x512"           # ⬅️ 메모리 절약
         )
 
-        image_url = result.data[0].url
+        log.info("📦 Raw image result: %s", result)
+
+        image_url = result.data[0].url if result.data else None
+
+        if not image_url:
+            return jsonify({"error": "No image returned by OpenAI"}), 500
+
         log.info("🖼️ Image generated successfully")
         return jsonify({"image_url": image_url}), 200
 
