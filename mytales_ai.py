@@ -94,7 +94,7 @@ def generate_story():
         return jsonify({"error": str(e)}), 500
 
 # ───────────────────────────────
-# 4️⃣ 삽화 생성 (영문 프롬프트 변환 → DALL·E-2)
+# 4️⃣ 삽화 생성 (GPT 영어 변환 → DALL·E-3)
 # ───────────────────────────────
 @app.post("/generate-image")
 def generate_image():
@@ -108,11 +108,10 @@ def generate_image():
         prompt_for_gpt = (
             "You are a professional children's storybook illustrator.\n"
             "Read the following Korean paragraph carefully and write ONE short English sentence "
-            "that describes the scene vividly for DALL·E.\n"
-            "Include: the child’s name and age, the setting, main action, facial expression, "
-            "emotion, and color tone.\n"
-            "Use a gentle, warm, pastel storybook style. "
-            "Avoid realism, metal, statues, logos, or text.\n"
+            "that vividly describes the scene for DALL·E-3.\n"
+            "Include: the child’s name and age, setting, main action, expression, emotion, and color tone.\n"
+            "Use warm, gentle, pastel storybook illustration style.\n"
+            "Avoid realism, metal, statues, logos, or any text.\n"
             "Output only one English sentence.\n\n"
             f"Paragraph:\n{text_prompt}"
         )
@@ -121,25 +120,26 @@ def generate_image():
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You convert Korean story text into vivid English illustration prompts."},
-                {"role": "user", "content": prompt_for_gpt}
+                {"role": "user", "content": prompt_for_gpt},
             ],
             temperature=0.6,
-            max_tokens=120
+            max_tokens=120,
         )
 
         refined_prompt = gpt_scene.choices[0].message.content.strip()
-        log.info("🖋️ English scene prompt for DALL·E: %s", refined_prompt)
+        log.info("🖋️ English prompt for DALL-E-3: %s", refined_prompt)
 
-        # 🎨 DALL·E-2로 이미지 생성
+        # 🎨 DALL·E-3 고해상도 삽화 생성
         full_prompt = (
             f"{refined_prompt}. "
-            "Children’s storybook illustration, soft pastel colors, warm lighting, cute expressive characters."
+            "Highly detailed children's storybook illustration, warm lighting, soft pastel colors, "
+            "expressive characters, 4k quality, artistic composition."
         )
 
         result = client.images.generate(
-            model="dall-e-2",
+            model="dall-e-3",
             prompt=full_prompt,
-            size="512x512"
+            size="1024x1024"
         )
 
         image_url = result.data[0].url if result.data else None
