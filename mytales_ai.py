@@ -1,17 +1,16 @@
-# mytales_ai.py (v6-Lite)
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-import os, json, re, logging, traceback, gc
+import os, json, re, logging, traceback
 
-# ─────────────────────────────
+# ────────────────────────────────────────────────
 # 1️⃣ 환경 설정
-# ─────────────────────────────
+# ────────────────────────────────────────────────
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
-    raise RuntimeError("❌ OPENAI_API_KEY not found")
+    raise RuntimeError("❌ OPENAI_API_KEY not found in environment variables")
 
 client = OpenAI(api_key=API_KEY)
 
@@ -20,28 +19,21 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("mytales")
 
-# ─────────────────────────────
-# 2️⃣ 캐릭터 설명 (일관성 유지)
-# ─────────────────────────────
-MAIN_CHARACTER_DESC = (
-    "7살 여자아이 ‘수정’. 짧은 갈색 머리에 노란 원피스를 입고, "
-    "밝고 호기심 많은 표정을 짓고 있는 모습."
-)
-
-# ─────────────────────────────
-# 3️⃣ 기본 라우트
-# ─────────────────────────────
+# ────────────────────────────────────────────────
+# 2️⃣ 기본 라우트
+# ────────────────────────────────────────────────
 @app.get("/")
 def root():
-    return "✅ MyTales Flask API v6-Lite running."
+    return "✅ MyTales Flask API is running."
 
 @app.get("/healthz")
 def healthz():
     return {"ok": True}, 200
 
-# ─────────────────────────────
-# 4️⃣ /generate-story
-# ─────────────────────────────
+
+# ────────────────────────────────────────────────
+# 3️⃣ /generate-story : 동화 + 이미지 프롬프트 생성
+# ────────────────────────────────────────────────
 @app.post("/generate-story")
 def generate_story():
     try:
@@ -57,101 +49,130 @@ def generate_story():
     if not all([name, age, gender, goal]):
         return jsonify({"error": "모든 항목을 입력해주세요."}), 400
 
+    # 🧠 개선된 프롬프트 (일관된 캐릭터 + 창의성 강조)
     prompt = f"""
-너는 5~8세 어린이를 위한 전문 동화 작가이자 그림책 기획가야.
+너는 감성적이고 상상력 풍부한 유아 동화 작가야.
+아래 정보를 바탕으로 5~8세 어린이를 위한 따뜻하고 교훈적인 동화를 만들어줘.
 
-아이의 이름은 '{name}', 나이는 {age}세, 성별은 {gender}야.
-부모가 전달하고 싶은 교훈 주제는 '{goal}'이야.
+- 아이 이름: {name}
+- 나이: {age}세
+- 성별: {gender}
+- 훈육 주제: '{goal}'
 
-아이의 상상력을 자극하는 따뜻한 이야기를 써줘.
-현실 → 마법의 세계 → 변화 → 귀환 구조로 구성하고, 총 5개의 장면만 사용해.
+🪄 스토리 구성 지침:
+1. 총 6개의 장면으로 구성된 이야기로 써줘.
+2. 각 장면은 아이의 시선에서 흥미롭게 전개되어야 하며, 마법이나 상상력을 활용해도 좋아.
+3. 매 장면은 3~4문장으로, 감정 변화와 교훈적 흐름이 자연스럽게 이어지게 해줘.
+4. 마지막 장면에서는 아이가 스스로 배운 점을 깨닫는 따뜻한 결말로 마무리해.
 
-각 장면은 다음 형식으로:
-{{
- "paragraph": "아이도 이해할 수 있는 3~4문장 동화 내용",
- "image_prompt": "그 장면을 그린 듯한 한글 삽화 설명. {MAIN_CHARACTER_DESC} 포함"
-}}
+🎨 삽화 지침:
+- 각 장면에는 삽화를 위한 프롬프트도 함께 작성해줘.
+- 모든 장면의 주인공 {name}의 외형(머리색, 옷 색상, 표정 등)은 항상 일관되게 유지해줘.
+- 밝고 부드러운 색감, 유아용 그림책 스타일로 묘사하도록.
+- 이미지 프롬프트에는 감정 표현(기쁨, 놀람, 용기 등)과 배경 환경(정원, 하늘, 식탁 등)을 포함해줘.
 
-조건:
-- 쉬운 한글, 따뜻한 어조, 대화와 감정 묘사 중심
-- 교훈은 직접 말하지 말고 행동으로 표현
-- JSON 배열로만 출력
+📦 출력 형식 (JSON 배열로만):
+[
+  {{
+    "paragraph": "첫 번째 장면 내용",
+    "image_prompt": "첫 번째 장면의 삽화 설명"
+  }},
+  {{
+    "paragraph": "두 번째 장면 내용",
+    "image_prompt": "두 번째 장면의 삽화 설명"
+  }},
+  ...
+  {{
+    "paragraph": "여섯 번째 장면 내용",
+    "image_prompt": "여섯 번째 장면의 삽화 설명"
+  }}
+]
     """
 
     try:
-        res = client.chat.completions.create(
-            model="gpt-4o-mini-2024-07-18",
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # gpt-4o-mini는 텍스트+프롬프트 생성에 충분
             messages=[
-                {"role": "system", "content": "너는 창의적이고 따뜻한 유아 동화 작가야."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "너는 감정 표현이 풍부하고 일관된 캐릭터를 그릴 줄 아는 동화 작가야."},
+                {"role": "user", "content": prompt.strip()}
             ],
-            temperature=0.75,
-            max_tokens=900
+            temperature=0.8,
+            max_tokens=1600
         )
 
-        content = res.choices[0].message.content.strip()
-        log.info("✅ GPT Response preview: %s", content[:200])
-        del res  # 메모리 해제
+        content = response.choices[0].message.content.strip()
+        content = re.sub(r"```json|```", "", content).strip()
 
-        try:
-            story = json.loads(content)
-        except Exception:
-            story = re.findall(r'"paragraph"\s*:\s*"([^"]+)"|"image_prompt"\s*:\s*"([^"]+)"', content)
+        log.info("✅ GPT Response preview: %s", content[:300])
 
-        if not isinstance(story, list) or not story:
-            return jsonify({"error": "동화 생성 실패"}), 500
+        # JSON 파싱
+        story_data = json.loads(content)
 
-        gc.collect()
+        # 보정: 배열이 아닌 경우 단일 객체라도 리스트로 감싸기
+        if isinstance(story_data, dict):
+            story_data = [story_data]
+
+        # 구조 보정: paragraph 또는 image_prompt 누락 방지
+        story = []
+        for i, item in enumerate(story_data):
+            if isinstance(item, dict):
+                paragraph = item.get("paragraph", "").strip()
+                image_prompt = item.get("image_prompt", "").strip()
+                story.append({
+                    "paragraph": paragraph or f"{i+1}번째 장면: 내용이 누락되었습니다.",
+                    "image_prompt": image_prompt or f"{name}이(가) 등장하는 장면의 삽화."
+                })
+            elif isinstance(item, list) and len(item) >= 2:
+                story.append({"paragraph": item[0], "image_prompt": item[1]})
+            else:
+                story.append({"paragraph": str(item), "image_prompt": f"{name}이(가) 나오는 장면 묘사."})
+
         return Response(
             json.dumps({"story": story}, ensure_ascii=False),
             content_type="application/json; charset=utf-8"
         )
 
     except Exception as e:
-        log.error("❌ Story generation error: %s", traceback.format_exc())
+        log.error("❌ Error generating story: %s", traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
-# ─────────────────────────────
-# 5️⃣ /generate-image
-# ─────────────────────────────
+
+# ────────────────────────────────────────────────
+# 4️⃣ /generate-image : 삽화 생성
+# ────────────────────────────────────────────────
 @app.post("/generate-image")
 def generate_image():
     try:
         data = request.get_json(force=True)
-        text_prompt = data.get("prompt", "").strip()
-        if not text_prompt:
+        prompt = data.get("prompt", "").strip()
+
+        if not prompt:
             return jsonify({"error": "prompt is required"}), 400
 
-        full_prompt = (
-            f"{MAIN_CHARACTER_DESC}\n"
-            f"{text_prompt}\n"
-            "항상 같은 주인공으로 그려줘. "
-            "부드러운 파스텔톤, 따뜻한 햇살, 감정이 잘 드러나는 표정, "
-            "유아용 그림책 삽화 스타일로."
-        )
-
+        # 🖼️ DALL·E 3은 한글 프롬프트도 완벽 지원
         result = client.images.generate(
             model="dall-e-3",
-            prompt=full_prompt,
-            size="1024x1024"
+            prompt=f"유아 그림책 스타일로 따뜻하고 부드러운 색감의 장면: {prompt}",
+            size="1024x1024",
+            quality="standard"
         )
 
         image_url = result.data[0].url if result.data else None
-        del result
-        gc.collect()
 
         if not image_url:
-            return jsonify({"error": "No image generated"}), 500
+            return jsonify({"error": "No image returned by OpenAI"}), 500
 
+        log.info("🖼️ Image generated successfully: %s", image_url)
         return jsonify({"image_url": image_url}), 200
 
     except Exception as e:
-        log.error("❌ Image generation error: %s", traceback.format_exc())
+        log.error("❌ Error generating image: %s", traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
-# ─────────────────────────────
-# 6️⃣ 실행
-# ─────────────────────────────
+
+# ────────────────────────────────────────────────
+# 5️⃣ 앱 실행 (Render 자동 포트 인식)
+# ────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
