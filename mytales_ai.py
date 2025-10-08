@@ -1,9 +1,9 @@
-# mytales_ai.py
+# mytales_ai.py (v6-Lite)
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-import os, json, re, logging, traceback
+import os, json, re, logging, traceback, gc
 
 # ─────────────────────────────
 # 1️⃣ 환경 설정
@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("mytales")
 
 # ─────────────────────────────
-# 2️⃣ 주인공 외형 고정 설명
+# 2️⃣ 캐릭터 설명 (일관성 유지)
 # ─────────────────────────────
 MAIN_CHARACTER_DESC = (
     "7살 여자아이 ‘수정’. 짧은 갈색 머리에 노란 원피스를 입고, "
@@ -33,14 +33,14 @@ MAIN_CHARACTER_DESC = (
 # ─────────────────────────────
 @app.get("/")
 def root():
-    return "✅ MyTales Flask API v6 is running."
+    return "✅ MyTales Flask API v6-Lite running."
 
 @app.get("/healthz")
 def healthz():
     return {"ok": True}, 200
 
 # ─────────────────────────────
-# 4️⃣ /generate-story : 동화 생성
+# 4️⃣ /generate-story
 # ─────────────────────────────
 @app.post("/generate-story")
 def generate_story():
@@ -63,54 +63,35 @@ def generate_story():
 아이의 이름은 '{name}', 나이는 {age}세, 성별은 {gender}야.
 부모가 전달하고 싶은 교훈 주제는 '{goal}'이야.
 
-이 정보를 바탕으로, 아이가 몰입하고 상상할 수 있는 따뜻한 이야기를 만들어줘.
-단순한 일상 이야기가 아니라, 주인공이 특별한 모험이나 마법 같은 경험을 통해
-스스로 깨닫게 되는 이야기여야 해.
+아이의 상상력을 자극하는 따뜻한 이야기를 써줘.
+현실 → 마법의 세계 → 변화 → 귀환 구조로 구성하고, 총 5개의 장면만 사용해.
 
-다음 조건을 지켜서 써줘:
+각 장면은 다음 형식으로:
+{{
+ "paragraph": "아이도 이해할 수 있는 3~4문장 동화 내용",
+ "image_prompt": "그 장면을 그린 듯한 한글 삽화 설명. {MAIN_CHARACTER_DESC} 포함"
+}}
 
-1️⃣ 전체 이야기는 6개의 장면으로 구성돼.
-   - 첫 장면은 현실, 두 번째~다섯 번째는 상상의 세계, 여섯 번째는 현실로 돌아오는 구조.
-   - 각 문단은 3~4문장, 자연스럽게 이어지게 써.
-
-2️⃣ "paragraph" 부분:
-   - 쉬운 한글로 감정, 행동, 대화를 풍부하게 써.
-   - 유치원~초등 저학년 수준 단어만 사용.
-   - ‘손해’, ‘결심’ 같은 추상어 대신 구체적인 행동으로 표현.
-   - 교훈은 직접 말하지 말고 주인공의 행동으로 보여줘.
-
-3️⃣ "image_prompt" 부분:
-   - 해당 문단의 삽화를 한글로 1~2문장으로 설명해.
-   - 주인공의 외형은 항상 같아야 해:
-     “{MAIN_CHARACTER_DESC}”
-   - 장면의 배경, 색감, 분위기를 구체적으로 묘사해.
-   - “...하는 장면.” 으로 끝내.
-
-4️⃣ '{goal}' 주제가 직접 등장하지 않게, 이야기 속 상황으로 자연스럽게 표현해.
-
-💡 출력은 반드시 JSON 배열 형식으로 해:
-[
-  {{
-    "paragraph": "첫 번째 장면 내용",
-    "image_prompt": "첫 번째 삽화 설명"
-  }},
-  ...
-]
+조건:
+- 쉬운 한글, 따뜻한 어조, 대화와 감정 묘사 중심
+- 교훈은 직접 말하지 말고 행동으로 표현
+- JSON 배열로만 출력
     """
 
     try:
         res = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o-mini-2024-07-18",
             messages=[
                 {"role": "system", "content": "너는 창의적이고 따뜻한 유아 동화 작가야."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.8,
-            max_tokens=1500,
+            temperature=0.75,
+            max_tokens=900
         )
 
         content = res.choices[0].message.content.strip()
-        log.info("✅ GPT Response (preview): %s", content[:300])
+        log.info("✅ GPT Response preview: %s", content[:200])
+        del res  # 메모리 해제
 
         try:
             story = json.loads(content)
@@ -120,6 +101,7 @@ def generate_story():
         if not isinstance(story, list) or not story:
             return jsonify({"error": "동화 생성 실패"}), 500
 
+        gc.collect()
         return Response(
             json.dumps({"story": story}, ensure_ascii=False),
             content_type="application/json; charset=utf-8"
@@ -130,14 +112,13 @@ def generate_story():
         return jsonify({"error": str(e)}), 500
 
 # ─────────────────────────────
-# 5️⃣ /generate-image : 삽화 생성
+# 5️⃣ /generate-image
 # ─────────────────────────────
 @app.post("/generate-image")
 def generate_image():
     try:
         data = request.get_json(force=True)
         text_prompt = data.get("prompt", "").strip()
-
         if not text_prompt:
             return jsonify({"error": "prompt is required"}), 400
 
@@ -145,8 +126,8 @@ def generate_image():
             f"{MAIN_CHARACTER_DESC}\n"
             f"{text_prompt}\n"
             "항상 같은 주인공으로 그려줘. "
-            "부드러운 파스텔톤, 따뜻한 햇살, 풍부한 감정 표현, "
-            "유아용 그림책 스타일로."
+            "부드러운 파스텔톤, 따뜻한 햇살, 감정이 잘 드러나는 표정, "
+            "유아용 그림책 삽화 스타일로."
         )
 
         result = client.images.generate(
@@ -156,10 +137,13 @@ def generate_image():
         )
 
         image_url = result.data[0].url if result.data else None
+        del result
+        gc.collect()
+
         if not image_url:
             return jsonify({"error": "No image generated"}), 500
 
-        return jsonify({"image_url": image_url, "used_prompt": text_prompt}), 200
+        return jsonify({"image_url": image_url}), 200
 
     except Exception as e:
         log.error("❌ Image generation error: %s", traceback.format_exc())
