@@ -71,39 +71,51 @@ def sanitize_caption(caption: str, name="child", age="8", gender="child"):
 # ───────────────────────────────
 # GPT에게 장면 묘사 요청 (이미지 프롬프트)
 # ───────────────────────────────
+# GPT를 활용한 이미지 프롬프트 생성 (동화 문단 기반 시각화)
 def describe_scene(paragraph, name, age, gender, scene_index=0):
     try:
-        character_desc = (
-            f"The story is about a {age}-year-old {gender} named {name}, "
-            "who has short wavy brown hair and wears a yellow shirt and blue overalls throughout the story."
-        )
-
         prompt = f"""
-You are a children's storybook illustrator. Please generate a DALL·E style English image prompt
-based on the following scene description and story context.
+You are a professional illustrator assistant for children's storybooks.
 
-📘 Character:
-{character_desc}
+🎯 TASK:
+Based on the following short story paragraph, write **one highly detailed sentence** describing the scene
+as if you're instructing a storybook illustrator what to draw.
 
-📖 Scene {scene_index + 1}:
+Include:
+- Action: What is the child doing?
+- Emotion: What is the child feeling?
+- Environment: Where is the scene taking place?
+- Details: Colors, lighting, objects, time of day, season, magical or imaginative elements
+
+📘 CHARACTER INFO:
+- Name: {name}
+- Age: {age}
+- Gender: {gender}
+- Appearance: Always wears a yellow shirt and blue overalls, with short wavy brown hair
+- Keep this character design consistent
+
+📖 STORY PARAGRAPH:
 "{paragraph}"
 
-🖼️ Instruction:
-- Describe what should appear in the illustration.
-- Include background, actions, emotions, environment, atmosphere, and any fantasy or playful elements.
-- Use soft, child-friendly language and imagination.
-- Output only a short English sentence that can be used as a prompt for DALL·E.
-- Must include: pastel tone, watercolor, storybook style, child-safe, no text, no logos, same character and outfit
+📸 OUTPUT:
+Write one English sentence suitable as a prompt for DALL·E 3.
+Make it vivid, child-friendly, pastel tone, watercolor, storybook illustration, consistent character design.
+Do not include any unsafe or forbidden elements.
+
+Example:
+"A 6-year-old girl named Mina with short wavy brown hair, wearing a yellow shirt and blue overalls, is laughing as she jumps over a puddle in a sunny park, surrounded by playful ducks and cherry blossoms in a pastel watercolor storybook style."
+
+→ Now generate one like this based on the above paragraph.
 """
 
         res = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are an expert children's illustrator."},
+                {"role": "system", "content": "You are an expert in storybook illustration prompt writing."},
                 {"role": "user", "content": prompt.strip()}
             ],
             temperature=0.7,
-            max_tokens=300,
+            max_tokens=400,
         )
 
         caption = res.choices[0].message.content.strip()
@@ -111,8 +123,9 @@ based on the following scene description and story context.
 
     except Exception as e:
         log.error("❌ describe_scene GPT 호출 실패: %s", traceback.format_exc())
-        fallback = f"{age}-year-old {gender} named {name}, smiling in a warm storybook scene, watercolor style."
+        fallback = f"{age}-year-old {gender} named {name}, smiling in a cozy pastel storybook scene, watercolor style"
         return sanitize_caption(fallback, name, age, gender)
+
 
 # ───────────────────────────────
 # 2️⃣ 동화 생성 API
