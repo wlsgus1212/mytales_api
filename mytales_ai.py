@@ -30,7 +30,7 @@ def format_child_name(name: str) -> str:
     return f"{name}이는" if has_final else f"{name}는"
 
 # ───────────────────────────────
-# 이미지 프롬프트 정화
+# 이미지 프롬프트 정화기
 # ───────────────────────────────
 def sanitize_caption(caption: str, name="child", age="8", gender="child"):
     if not caption:
@@ -69,51 +69,50 @@ def sanitize_caption(caption: str, name="child", age="8", gender="child"):
     return caption
 
 # ───────────────────────────────
-# 장면 묘사 → 이미지 프롬프트로 변환
+# GPT에게 그림 장면 묘사 요청 (문단 기반)
 # ───────────────────────────────
-def describe_scene(paragraph, name, age, gender):
-    character = f"A {age}-year-old {gender} named {name}, with short wavy brown hair, wearing a yellow shirt and blue overalls"
+def describe_scene(paragraph, name, age, gender, scene_index=0):
+    try:
+        character_desc = (
+            f"The story is about a {age}-year-old {gender} named {name}, "
+            "who has short wavy brown hair and wears a yellow shirt and blue overalls throughout the story."
+        )
 
-    if any(k in paragraph for k in ["달렸", "뛰", "전력", "급히"]):
-        action = "is running with excitement"
-    elif "걷" in paragraph:
-        action = "is walking slowly and carefully"
-    elif any(k in paragraph for k in ["바라보", "쳐다보", "응시"]):
-        action = "is gazing curiously at something"
-    elif any(k in paragraph for k in ["앉", "쉬", "멈췄"]):
-        action = "is sitting down and resting"
-    else:
-        action = "is calmly standing"
+        prompt = f"""
+You are a children's storybook illustrator. Please generate a DALL·E style English image prompt
+based on the following scene description and story context.
 
-    if "숲" in paragraph:
-        background = "in a sunny, magical forest where light peeks through the trees"
-    elif "바다" in paragraph:
-        background = "on a peaceful beach with gentle waves"
-    elif "하늘" in paragraph or "별" in paragraph:
-        background = "under a sky filled with twinkling stars"
-    elif "학교" in paragraph:
-        background = "in a cozy and colorful classroom"
-    elif "성" in paragraph:
-        background = "near a grand fairytale castle"
-    elif "공원" in paragraph:
-        background = "in a quiet park with blooming flowers"
-    else:
-        background = "in a bright and warm open space"
+📘 Character:
+{character_desc}
 
-    if any(k in paragraph for k in ["기뻐", "행복", "웃"]):
-        emotion = "with a big, joyful smile"
-    elif any(k in paragraph for k in ["무서", "두려", "불안"]):
-        emotion = "looking slightly scared but trying to be brave"
-    elif any(k in paragraph for k in ["놀라", "깜짝"]):
-        emotion = "with wide eyes full of surprise"
-    elif any(k in paragraph for k in ["슬퍼", "울"]):
-        emotion = "with teary eyes but a hopeful heart"
-    else:
-        emotion = "with a calm and gentle expression"
+📖 Scene {scene_index + 1}:
+"{paragraph}"
 
-    scene = f"{character} {action} {background}, {emotion}. The illustration is drawn in soft pastel tones with a watercolor storybook style. No text or logos. Same outfit and hairstyle should be used to maintain consistency with previous scenes."
+🖼️ Instruction:
+- Describe what should appear in the illustration.
+- Include background, actions, emotions, environment, atmosphere, and any fantasy or playful elements.
+- Use soft, child-friendly language and imagination.
+- Output only a short English sentence that can be used as a prompt for DALL·E.
+- Must include: pastel tone, watercolor, storybook style, child-safe, no text, no logos, same character and outfit
+"""
 
-    return sanitize_caption(scene, name, age, gender)
+        res = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an expert children's illustrator."},
+                {"role": "user", "content": prompt.strip()}
+            ],
+            temperature=0.7,
+            max_tokens=300,
+        )
+
+        caption = res.choices[0].message.content.strip()
+        return sanitize_caption(caption, name, age, gender)
+
+    except Exception as e:
+        log.error("❌ describe_scene GPT 호출 실패: %s", traceback.format_exc())
+        fallback = f"{age}-year-old {gender} named {name}, smiling in a warm storybook scene, watercolor style."
+        return sanitize_caption(fallback, name, age, gender)
 
 # ───────────────────────────────
 # 2️⃣ 동화 생성 API
@@ -197,9 +196,9 @@ def generate_story():
         story_data = json.loads(content)
 
         story = []
-        for item in story_data["chapters"]:
+        for i, item in enumerate(story_data["chapters"]):
             paragraph = item.get("paragraph", "").strip()
-            caption = describe_scene(paragraph, name, age, gender)
+            caption = describe_scene(paragraph, name, age, gender, scene_index=i)
             story.append({
                 "title": item.get("title", ""),
                 "paragraph": paragraph,
