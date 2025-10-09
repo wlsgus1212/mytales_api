@@ -37,44 +37,51 @@ def with_particle(name: str) -> str:
         return f"{name}은"
 
 # ────────────────────────────────────────────────
-# 3️⃣ 이미지 프롬프트 자동 생성
+# 3️⃣ 일관형 이미지 프롬프트 생성
 # ────────────────────────────────────────────────
-def build_image_prompt(paragraph, name, age, gender):
-    base = f"{age}-year-old {gender} child named {name}"
-    style = "soft watercolor storybook style, warm pastel colors, cinematic composition"
+def build_image_prompt_v2(paragraph, name, age, gender, base_appearance=None, base_background=None):
+    """문단을 분석해 일관성 있는 삽화 프롬프트 생성"""
+    if base_appearance is None:
+        base_appearance = "soft brown hair, pastel clothes, kind expression"
+    if base_background is None:
+        base_background = "forest"
 
-    # 핵심 장면 추출
-    if "나비" in paragraph:
-        scene = "a glowing magical butterfly meeting the child in a forest"
-    elif "바다" in paragraph:
-        scene = "the child near gentle blue ocean waves"
-    elif "별" in paragraph:
-        scene = "the child watching bright stars in the night sky"
-    elif "눈" in paragraph:
-        scene = "the child playing in softly falling snow"
-    elif "꽃" in paragraph:
-        scene = "the child surrounded by blooming flowers"
-    elif "왕" in paragraph or "공주" in paragraph:
-        scene = "the child wearing a royal outfit in a fairytale castle"
-    else:
-        scene = "the child in a warm natural background"
+    # 배경 탐색
+    if "바다" in paragraph: base_background = "beach"
+    elif "성" in paragraph or "공주" in paragraph: base_background = "castle"
+    elif "하늘" in paragraph or "별" in paragraph: base_background = "sky"
+    elif "학교" in paragraph: base_background = "school"
+    elif "숲" in paragraph: base_background = "forest"
 
     # 감정 추론
-    if any(k in paragraph for k in ["웃","기뻐","밝","신나","즐겁"]):
-        emotion = "smiling happily"
-    elif any(k in paragraph for k in ["걱정","두려","무섭","불안"]):
-        emotion = "looking slightly worried but hopeful"
-    elif any(k in paragraph for k in ["놀라","깜짝","호기심","궁금"]):
-        emotion = "showing curiosity and wonder"
-    elif any(k in paragraph for k in ["용기","결심","도전","해냈"]):
-        emotion = "looking brave and confident"
+    if any(k in paragraph for k in ["웃","기뻐","밝","행복"]):
+        emotion = "smiling warmly"
+    elif any(k in paragraph for k in ["놀라","깜짝","호기심"]):
+        emotion = "curious expression"
+    elif any(k in paragraph for k in ["걱정","두려","무섭"]):
+        emotion = "slightly worried face"
+    elif any(k in paragraph for k in ["용기","도전","결심","해냈"]):
+        emotion = "determined look"
     else:
-        emotion = "gentle and calm"
+        emotion = "gentle calm expression"
 
-    return f"{base}, {emotion}, {scene}, {style}"
+    # 행동 추론
+    if "달렸" in paragraph: action = "running"
+    elif "앉았" in paragraph: action = "sitting"
+    elif "바라보" in paragraph: action = "looking at something"
+    elif "안았" in paragraph: action = "hugging"
+    else: action = "standing"
+
+    # 장면 프롬프트 조합
+    return (
+        f"{age}-year-old {gender} child named {name}, same appearance as previous scene, "
+        f"{base_appearance}, {action}, {emotion}, "
+        f"in the same {base_background} environment, "
+        f"soft watercolor storybook style, warm pastel tones, cinematic light"
+    ), base_appearance, base_background
 
 # ────────────────────────────────────────────────
-# 4️⃣ /generate-story : 이야기 → 이미지 명령문 자동 변환
+# 4️⃣ /generate-story : 훈육형 동화 + 이미지 자동화
 # ────────────────────────────────────────────────
 @app.post("/generate-story")
 def generate_story():
@@ -92,23 +99,27 @@ def generate_story():
 
     name_particle = with_particle(name)
 
-    # GPT 프롬프트 (텍스트 전용)
+    # 🧠 훈육 중심 동화 프롬프트 (V15)
     prompt = f"""
-너는 5~8세 어린이를 위한 감성 동화 작가야.  
-'{goal}' 주제를 자연스럽게 담은 짧은 이야기를 써줘.  
-이야기는 현실·판타지 등 어떤 세계관으로도 시작 가능하며 다음 요건을 지켜라.
+너는 5~8세 어린이를 위한 **훈육형 감성 동화 작가**야.  
+'{goal}'을 주제로, 아이가 스스로 깨닫는 교훈을 행동과 감정 변화로 보여줘.  
+직접적인 설명이나 “~해야 해요” 같은 설교체는 쓰지 마.  
+이야기는 현실, 판타지, 동물 세계, 공주 이야기 등 어떤 세계관에서도 시작 가능하다.  
+하지만 끝에는 반드시 주제에 맞는 **교훈적 변화**가 있어야 한다.  
 
-1️⃣ 아이의 감정 흐름은 평온→갈등→깨달음→따뜻함 으로 이어져야 한다.  
-2️⃣ '혼란', '불안정' 등 어려운 단어 금지. 쉬운 말만 사용.  
-3️⃣ 교훈은 설교 형태가 아니라 행동이나 상징으로 표현.  
-4️⃣ 각 장면은 3~4 문장으로 구성. (총 6 장면 정도)  
-5️⃣ 반복되는 리듬 문장 1~2회 포함 (예: "후우, 바람이 속삭였어요.")  
-6️⃣ 출력은 JSON 배열 형식으로 paragraph 필드만 포함.  
+### 구성 규칙
+1️⃣ 총 6장면. 각 장면은 2~4문장.
+2️⃣ 문체는 짧고 부드러워야 하며, 어려운 단어나 ‘혼란’ 같은 어휘는 금지.
+3️⃣ 주인공 {name}의 감정은 ‘문제 → 시도 → 실패 → 깨달음 → 변화’로 이어져야 한다.
+4️⃣ 마지막 장면에서는 {goal}의 교훈이 행동으로 드러나야 한다.
+5️⃣ 문장 중 하나는 리듬감 있는 반복 문장으로 만들어라.  
+   예: “후우, 바람이 속삭였어요.”, “톡톡, 마음이 두드렸어요.”
+6️⃣ 출력은 JSON 배열로 paragraph만 포함해라.
 
-📦 출력형식:
+📦 출력 형식:
 [
   {{"paragraph":"첫 장면"}},
-  {{"paragraph":"둘째 장면"}},
+  ...,
   {{"paragraph":"마지막 장면"}}
 ]
 """
@@ -117,12 +128,13 @@ def generate_story():
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role":"system","content":"너는 감정적으로 따뜻하고 아이 눈높이에 맞는 동화를 쓰는 전문가야."},
+                {"role":"system","content":"너는 어린이를 위한 교훈 중심 동화를 쓰는 전문가야."},
                 {"role":"user","content":prompt.strip()}
             ],
-            temperature=0.85,
+            temperature=0.8,
             max_tokens=1600,
         )
+
         content = response.choices[0].message.content.strip()
         content = re.sub(r"```json|```","",content).strip()
         story_data = json.loads(content)
@@ -130,9 +142,12 @@ def generate_story():
             story_data=[story_data]
 
         story=[]
+        base_appearance, base_background = None, None
         for item in story_data:
             paragraph=item.get("paragraph","").strip()
-            img_prompt=build_image_prompt(paragraph,name,age,gender)
+            img_prompt, base_appearance, base_background = build_image_prompt_v2(
+                paragraph,name,age,gender,base_appearance,base_background
+            )
             story.append({"paragraph":paragraph,"image_prompt":img_prompt})
 
         return Response(json.dumps({"story":story},ensure_ascii=False),
@@ -155,7 +170,7 @@ def generate_image():
 
         result=client.images.generate(
             model="dall-e-3",
-            prompt=f"{prompt}",
+            prompt=prompt,
             size="1024x1024",
             quality="standard"
         )
