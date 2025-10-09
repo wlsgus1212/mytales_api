@@ -1,3 +1,4 @@
+# mytales_ai.py
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from openai import OpenAI
@@ -5,19 +6,18 @@ from dotenv import load_dotenv
 import os, json, re, traceback, logging
 
 # ───────────────────────────────
-# 1️⃣ 초기 설정
+# 1️⃣ 환경 설정
 # ───────────────────────────────
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = Flask(__name__)
 CORS(app)
-
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("mytales")
 
 # ───────────────────────────────
-# 2️⃣ 조사 자동 처리
+# 2️⃣ 조사 자동 처리 (은/는)
 # ───────────────────────────────
 def with_particle(name: str) -> str:
     if not name:
@@ -44,7 +44,7 @@ def generate_story():
 
         name_particle = with_particle(name)
 
-        # ─────────────── 프롬프트 (보완 버전) ───────────────
+        # ───────────── 프롬프트 ─────────────
         prompt = f"""
 너는 5~8세 어린이를 위한 감성 그림책 작가이자 일러스트 디렉터야.  
 이야기의 목적은 아이가 자신의 감정과 행동을 이해하고,  
@@ -121,6 +121,7 @@ def generate_story():
 ### 🚫 금지 규칙
 - 불안하거나 폭력적이거나 어두운 소재는 절대 사용하지 마라.  
 - 슬픔, 분노, 두려움이 등장하더라도 반드시 부드럽게 해소되어야 한다.  
+- 음식, 음료, 알코올, 흡연, 공포, 싸움, 무기, 성인 소재는 금지.  
 
 ---
 
@@ -130,7 +131,7 @@ def generate_story():
     "paragraph": "첫 번째 장면 내용 (3~5문장, 감정 이유와 리듬 포함)",
     "image_prompt": "한 문장(30단어 이하)으로 구성된 삽화 설명. {gender} child named {name}, same appearance as previous scene, soft watercolor storybook style, pastel color palette, warm gentle light, consistent character design"
   }},
-  ...
+  ...,
   {{
     "paragraph": "마지막 장면 내용 (3~5문장, 상징적 보상과 여운)",
     "image_prompt": "consistent with previous scene illustration, same soft watercolor tone and lighting"
@@ -141,15 +142,14 @@ def generate_story():
 - JSON 외의 설명, 텍스트, 코드블록(```)은 절대 포함하지 마라.  
 - 모든 장면은 한 세계 안에서 시간과 감정의 흐름이 자연스럽게 이어져야 한다.  
 - text와 image_prompt는 서로 정확히 대응되어야 한다.  
-- 그림만 봐도 사건과 감정이 이해되어야 한다.
+- 그림만 봐도 사건과 감정이 이해되어야 한다.  
 """
 
-        # ─────────────── GPT 요청 ───────────────
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=2000
+            max_tokens=2000,
         )
 
         content = response.choices[0].message.content.strip()
@@ -161,17 +161,16 @@ def generate_story():
         story = []
         for i, item in enumerate(story_data):
             paragraph = item.get("paragraph", "").strip()
-            image_prompt = item.get("image_prompt", "").strip()
+            image_prompt = (
+                item.get("image_prompt") or item.get("imagePrompt") or item.get("prompt") or ""
+            ).strip()
             if not image_prompt:
                 image_prompt = f"{name_particle}이 등장하는 장면: {paragraph[:60]}"
-            story.append({
-                "paragraph": paragraph,
-                "image_prompt": image_prompt
-            })
+            story.append({"paragraph": paragraph, "image_prompt": image_prompt})
 
         return Response(
             json.dumps({"story": story}, ensure_ascii=False),
-            content_type="application/json; charset=utf-8"
+            content_type="application/json; charset=utf-8",
         )
 
     except Exception as e:
@@ -186,26 +185,24 @@ def generate_image():
     try:
         data = request.get_json(force=True)
         prompt = data.get("prompt", "").strip()
-
         if not prompt:
             return jsonify({"error": "prompt is required"}), 400
 
-        safe_prompt = (
-            f"Children's storybook illustration, watercolor and pastel tones, "
-            f"soft lighting, gentle atmosphere, consistent human child character, "
-            f"avoid animals, monsters, or adult themes. {prompt}"
+        full_prompt = (
+            f"children's storybook watercolor illustration, pastel tone, soft gentle light, "
+            f"consistent child character, no violence or adult themes. {prompt}"
         )
 
         result = client.images.generate(
             model="dall-e-3",
-            prompt=safe_prompt,
+            prompt=full_prompt,
             size="1024x1024",
             quality="standard"
         )
 
         image_url = result.data[0].url if result.data else None
         if not image_url:
-            return jsonify({"error": "No image returned by OpenAI"}), 500
+            return jsonify({"error": "No image returned"}), 500
 
         return jsonify({"image_url": image_url}), 200
 
@@ -214,7 +211,7 @@ def generate_image():
         return jsonify({"error": str(e)}), 500
 
 # ───────────────────────────────
-# 5️⃣ 실행
+# 5️⃣ 앱 실행
 # ───────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
