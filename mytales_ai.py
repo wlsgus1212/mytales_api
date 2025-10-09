@@ -35,8 +35,9 @@ def sanitize_caption(caption: str, name="child", age="8", gender="child"):
     if not caption:
         caption = ""
     banned = [
-        "blood","kill","dead","violence","weapon","fight","monster","ghost","drug","alcohol","beer","wine","sex",
-        "photo","realistic","photoreal","gore","fear","scary","dark","logo","text","brand","war"
+        "blood","kill","dead","violence","weapon","fight","monster","ghost","drug","alcohol",
+        "beer","wine","sex","photo","realistic","photoreal","gore","fear","scary","dark",
+        "logo","text","brand","war"
     ]
     replace = {
         "monster": "friendly imaginary friend",
@@ -48,17 +49,21 @@ def sanitize_caption(caption: str, name="child", age="8", gender="child"):
         "realistic": "watercolor",
         "photo": "watercolor"
     }
-    for k,v in replace.items():
-        caption = re.sub(rf"\b{k}\b", v, flags=re.I)
+    # ✅ string 인자(capiton) 추가
+    for k, v in replace.items():
+        caption = re.sub(rf"\b{k}\b", v, caption, flags=re.I)
     for k in banned:
-        caption = re.sub(rf"\b{k}\b", "", flags=re.I)
+        caption = re.sub(rf"\b{k}\b", "", caption, flags=re.I)
+
     caption = re.sub(r'["\'`<>]', " ", caption).strip()
     words = caption.split()
     if len(words) > 28:
         caption = " ".join(words[:28])
+
     tail = ", same character and same world, consistent outfit and hairstyle, pastel tone, soft watercolor storybook style, child-friendly, no text, no logos"
-    if "storybook" not in caption:
+    if "storybook" not in caption.lower():
         caption += tail
+
     if not re.search(r"\b\d+[- ]?year[- ]?old\b|\b세\b", caption):
         caption = f"{age}-year-old {gender} named {name}, " + caption
     return caption
