@@ -2,180 +2,205 @@ from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-import os, json, re, logging, traceback
+import os, json, re, traceback, logging
 
-# ────────────────────────────────────────────────
-# 1) 환경 설정
-# ────────────────────────────────────────────────
+# ───────────────────────────────
+# 1️⃣ 환경설정
+# ───────────────────────────────
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
-    raise RuntimeError("❌ OPENAI_API_KEY not found in environment variables")
+    raise RuntimeError("❌ OPENAI_API_KEY not found in .env")
 
 client = OpenAI(api_key=API_KEY)
-
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("mytales")
 
-# ────────────────────────────────────────────────
-# 2) 자연스러운 조사 보정: 진현→진현이는
-# ────────────────────────────────────────────────
+# ───────────────────────────────
+# 조사 자동 보정 (희진 → 희진이는)
+# ───────────────────────────────
 def with_particle(name: str) -> str:
     if not name:
         return name
-    last = name[-1]
-    code = ord(last) - 44032
-    has_final = (code % 28) != 0
-    soft = ["현","민","진","윤","린","빈","원","연","훈","준","은","선","안","환"]
-    if last in soft:
-        return f"{name}이는"
-    elif not has_final:
-        return f"{name}는"
-    else:
-        return f"{name}은"
+    last = ord(name[-1]) - 44032
+    has_final = (last % 28) != 0
+    return f"{name}은" if has_final else f"{name}는"
 
-# ────────────────────────────────────────────────
-# 3) /generate-story : 동화+삽화설명 통합 생성(V20 규칙 강화)
-# ────────────────────────────────────────────────
+# ───────────────────────────────
+# 이미지 캡션 정화기 (금지어 치환 + 안전 꼬리표)
+# ───────────────────────────────
+def sanitize_caption(caption: str, name="child", age="8", gender="child"):
+    if not caption:
+        caption = ""
+    banned = [
+        "blood","kill","dead","violence","weapon","fight","monster","ghost","drug","alcohol","beer","wine","sex",
+        "photo","realistic","photoreal","gore","fear","scary","dark","logo","text","brand","war"
+    ]
+    replace = {
+        "monster": "friendly imaginary friend",
+        "fight": "face the challenge",
+        "weapon": "magic wand",
+        "blood": "red ribbon",
+        "dark": "warm light",
+        "fire": "gentle light",
+        "realistic": "watercolor",
+        "photo": "watercolor"
+    }
+    for k,v in replace.items():
+        caption = re.sub(rf"\b{k}\b", v, flags=re.I)
+    for k in banned:
+        caption = re.sub(rf"\b{k}\b", "", flags=re.I)
+    caption = re.sub(r'["\'`<>]', " ", caption).strip()
+    words = caption.split()
+    if len(words) > 28:
+        caption = " ".join(words[:28])
+    tail = ", same character and same world, consistent outfit and hairstyle, pastel tone, soft watercolor storybook style, child-friendly, no text, no logos"
+    if "storybook" not in caption:
+        caption += tail
+    if not re.search(r"\b\d+[- ]?year[- ]?old\b|\b세\b", caption):
+        caption = f"{age}-year-old {gender} named {name}, " + caption
+    return caption
+
+# ───────────────────────────────
+# 동화 장면 기반 이미지 캡션 생성
+# ───────────────────────────────
+def build_caption(paragraph, name, age, gender):
+    act, bg, emo = "standing", "in a bright place", "gentle smile"
+    if any(k in paragraph for k in ["달렸", "뛰"]): act = "running"
+    elif "걷" in paragraph: act = "walking"
+    elif "바라보" in paragraph: act = "looking"
+    if "숲" in paragraph: bg = "in a sunny forest"
+    elif "바다" in paragraph: bg = "by a calm sea"
+    elif "하늘" in paragraph or "별" in paragraph: bg = "under a starry sky"
+    elif "학교" in paragraph: bg = "at a cozy school"
+    elif "성" in paragraph: bg = "near a fairytale castle"
+    if "웃" in paragraph: emo = "happy smile"
+    elif "두려" in paragraph: emo = "slightly worried but brave"
+    elif "놀라" in paragraph: emo = "curious face"
+    raw = f"{age}-year-old {gender} named {name}, {act}, {bg}, {emo}, pastel colors, warm gentle light, soft watercolor storybook style, child-friendly"
+    return sanitize_caption(raw, name, age, gender)
+
+# ───────────────────────────────
+# 2️⃣ /generate-story : 동화 텍스트 생성
+# ───────────────────────────────
 @app.post("/generate-story")
 def generate_story():
     try:
         data = request.get_json(force=True)
-    except Exception:
-        return jsonify({"error": "invalid_json"}), 400
+        name = data.get("name","").strip()
+        age = data.get("age","")
+        gender = data.get("gender","").strip()
+        goal = data.get("education_goal","").strip()
+        if not all([name, age, gender, goal]):
+            return jsonify({"error":"모든 항목을 입력해주세요."}),400
 
-    name   = data.get("name","").strip()
-    age    = str(data.get("age","")).strip()
-    gender = data.get("gender","").strip()
-    goal   = data.get("education_goal","").strip()
+        name_particle = with_particle(name)
 
-    if not all([name, age, gender, goal]):
-        return jsonify({"error":"모든 항목을 입력해주세요."}),400
+        prompt = f"""
+너는 5~8세 어린이를 위한 감성적이고 창의적인 동화 작가야.
+다음 정보를 바탕으로 따뜻하고 상상력 넘치는 이야기를 써줘.
 
-    name_particle = with_particle(name)
-
-    # ── V20 통합 프롬프트 (동화+삽화설명 동시에 생성, 캡션 누락 불가)
-    prompt = f"""
-너는 5~8세 어린이를 위한 **훈육형 감성 동화 작가이자 일러스트 디렉터**다.
-
-아래 정보를 바탕으로, 아이가 스스로 교훈을 깨닫는 따뜻한 동화와
-각 장면에 맞는 삽화 설명(illustration_caption)을 **반드시** 함께 만들어라.
-
-[입력 정보]
-- 주인공 이름: {name} ({name_particle})
+- 이름: {name}
 - 나이: {age}세
 - 성별: {gender}
-- 훈육 주제: "{goal}"
+- 주제: '{goal}'
 
-[동화 규칙]
-1) 전체 6장면. 각 장면 2~4문장. 아이 시점, 짧고 부드러운 문장.
-2) 구조: 문제 → 시도 → 실패 → 깨달음 → 변화 → 교훈(행동으로 표현, 설교 금지).
-3) 어려운 단어(혼란, 불안, 우울 등) 금지. 안전하고 따뜻한 분위기 유지.
-4) 세계관은 자유(현실/마법/동물/공주 등)이나 톤은 항상 밝고 온화.
-5) 리듬 문장 1회 이상 포함(예: “후우, 바람이 속삭였어요.” / “톡톡, 마음이 두드렸어요.”).
+💡 목표:
+아이에게 가르침이 아닌 깨달음으로 전달되는 교훈형 동화.
+읽는 아이가 스스로 "아, 나도 저렇게 해야겠다"라고 느끼게 해줘.
 
-[삽화설명 규칙(V20)]
-- 너는 **어린이 동화 삽화 아티스트**다.
-- 각 장면에 대해 "illustration_caption"을 **반드시** 1문장(≤30단어)으로 생성한다.
-- paragraph의 행동·감정·배경을 시각적으로 정확히 반영해야 한다.
-- 캐릭터 일관성: {age}세 {gender} {name}의 외형/옷/머리/표정 톤은 모든 장면에서 동일.
-- 스타일: 밝고 순한 파스텔 + 부드러운 수채화 + 어린이 그림책풍.
-- 금지: realistic photo, dark tones, horror, sadness, violence, blood, complex crowd, brands, religious icons.
-- 문장 구성요소(모두 포함): [나이·성별·이름 + 행동 + 배경 + 감정 + 조명 + 스타일 + 일관성표현]
-- 시리즈 일관성 문구를 문장 끝에 포함: "same character and same world, consistent palette and tone".
+📚 구성 규칙:
+1. 총 6개의 장면으로 구성된 완전한 이야기.
+2. 각 장면은 아이의 시선에서 2~3문장.
+3. 각 장면마다 감정 변화와 행동이 드러나야 함.
+4. 구조:
+   1장: 일상/상상의 시작
+   2장: 문제의 발견
+   3장: 시도와 실패
+   4장: 마법적 전환점(깨달음의 씨앗)
+   5장: 행동 변화
+   6장: 따뜻한 결말과 교훈적 자각
+5. 교훈은 직접 말하지 말고, 아이의 행동으로 보여줘.
+6. 어두운 내용, 폭력, 공포, 현실의 죽음·범죄 등은 절대 금지.
+7. 밝고 희망적, 유머와 상상력이 섞인 톤 유지.
 
-[출력 형식(이 형식만 출력, 다른 텍스트/코드블록 금지)]
+출력 형식(JSON 배열):
 [
-  {{"paragraph":"첫 장면 내용","illustration_caption":"첫 장면 삽화 설명"}},
-  {{"paragraph":"두 번째 장면 내용","illustration_caption":"두 번째 장면 삽화 설명"}},
-  {{"paragraph":"세 번째 장면 내용","illustration_caption":"세 번째 장면 삽화 설명"}},
-  {{"paragraph":"네 번째 장면 내용","illustration_caption":"네 번째 장면 삽화 설명"}},
-  {{"paragraph":"다섯 번째 장면 내용","illustration_caption":"다섯 번째 장면 삽화 설명"}},
-  {{"paragraph":"여섯 번째 장면 내용(교훈적 결말)","illustration_caption":"여섯 번째 장면 삽화 설명"}}
+  {{"paragraph": "첫 번째 장면"}},
+  {{"paragraph": "두 번째 장면"}},
+  {{"paragraph": "세 번째 장면"}},
+  {{"paragraph": "네 번째 장면"}},
+  {{"paragraph": "다섯 번째 장면"}},
+  {{"paragraph": "여섯 번째 장면 (결말)"}}
 ]
 """
 
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o",  # JSON 준수 강화
+        res = client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
-                {"role":"system","content":"너는 어린이를 위한 교훈 중심 동화를 쓰는 전문가이자 그림책 일러스트 디렉터다."},
+                {"role":"system","content":"너는 어린이 눈높이에 맞춰 교훈적이고 상상력 있는 이야기를 쓰는 작가야."},
                 {"role":"user","content":prompt.strip()}
             ],
-            temperature=0.8,
-            max_tokens=2200,
+            temperature=0.9,
+            max_tokens=1600,
         )
 
-        content = resp.choices[0].message.content.strip()
+        content = res.choices[0].message.content.strip()
         content = re.sub(r"```json|```", "", content).strip()
+        story_data = json.loads(content)
 
-        # 1차 파싱
-        try:
-            story_data = json.loads(content)
-        except json.JSONDecodeError:
-            # 2차 보정: paragraph/caption 쌍만 추출
-            pairs = re.findall(
-                r'"paragraph"\s*:\s*"([^"]+)"\s*,\s*"illustration_caption"\s*:\s*"([^"]+)"', content
-            )
-            story_data = [{"paragraph": p, "illustration_caption": c} for p, c in pairs]
-
-        if isinstance(story_data, dict):
-            story_data = [story_data]
-
-        # 필드 보정 및 누락 방지
-        story=[]
-        fallback_caption = f'{age}세 {gender} {name}가 따뜻한 분위기에서 행동하는 장면, soft watercolor storybook style, pastel colors, warm gentle light, same character and same world, consistent palette and tone'
+        story = []
         for i, item in enumerate(story_data):
-            paragraph = (item.get("paragraph","") if isinstance(item,dict) else str(item)).strip()
-            caption   = (item.get("illustration_caption","") if isinstance(item,dict) else "").strip()
-            if not paragraph:
-                paragraph = f"{i+1}번째 장면: 내용 누락"
-            if not caption:
-                caption = fallback_caption
-            # 30단어 초과 방지(너무 길면 축약)
-            if len(caption.split()) > 30:
-                caption = " ".join(caption.split()[:30])
+            paragraph = item.get("paragraph","").strip() if isinstance(item,dict) else str(item)
+            caption = build_caption(paragraph, name, age, gender)
             story.append({"paragraph": paragraph, "illustration_caption": caption})
 
         return Response(json.dumps({"story":story}, ensure_ascii=False),
                         content_type="application/json; charset=utf-8")
 
     except Exception as e:
-        log.error("❌ Error generating story:\n%s", traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        log.error("❌ generate-story error: %s", traceback.format_exc())
+        return jsonify({"error":str(e)}),500
 
-# ────────────────────────────────────────────────
-# 4) /generate-image : illustration_caption 기반 생성
-# ────────────────────────────────────────────────
+# ───────────────────────────────
+# 3️⃣ /generate-image : DALL·E 3 이미지 생성 (정화 재시도 포함)
+# ───────────────────────────────
 @app.post("/generate-image")
 def generate_image():
     try:
         data = request.get_json(force=True)
-        caption = data.get("prompt","").strip()
-        if not caption:
+        prompt = (data.get("prompt") or "").strip()
+        if not prompt:
             return jsonify({"error":"prompt is required"}),400
 
-        result = client.images.generate(
-            model="dall-e-3",
-            prompt=f"{caption}",
-            size="1024x1024",
-            quality="standard"
-        )
-        url = result.data[0].url if result.data else None
-        if not url:
-            return jsonify({"error":"No image returned"}),500
+        def attempt(p):
+            return client.images.generate(model="dall-e-3", prompt=p, size="1024x1024", quality="standard")
 
-        return jsonify({"image_url": url}), 200
+        try:
+            r = attempt(prompt)
+            url = r.data[0].url
+            return jsonify({"image_url":url}),200
+        except Exception:
+            clean = sanitize_caption(prompt)
+            try:
+                r2 = attempt(clean)
+                url = r2.data[0].url
+                return jsonify({"image_url":url}),200
+            except Exception:
+                fallback = sanitize_caption("child smiling warmly in a safe bright place, watercolor style")
+                r3 = attempt(fallback)
+                url = r3.data[0].url
+                return jsonify({"image_url":url, "note":"fallback"}),200
 
     except Exception as e:
-        log.error("❌ Error generating image:\n%s", traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        log.error("❌ generate-image error: %s", traceback.format_exc())
+        return jsonify({"error":str(e)}),500
 
-# ────────────────────────────────────────────────
-# 5) 앱 실행
-# ────────────────────────────────────────────────
+# ───────────────────────────────
+# 4️⃣ 실행
+# ───────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
