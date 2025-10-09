@@ -1,3 +1,4 @@
+# ⚙️ 이 코드는 mytales_ai.py 로 저장하여 실행
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from openai import OpenAI
@@ -33,12 +34,10 @@ def format_child_name(name: str) -> str:
 # 이미지 프롬프트 정화기
 # ───────────────────────────────
 def sanitize_caption(caption: str, name="child", age="8", gender="child"):
-    if not caption:
-        caption = ""
     banned = [
-        "blood","kill","dead","violence","weapon","fight","monster","ghost","drug","alcohol",
-        "beer","wine","sex","photo","realistic","photoreal","gore","fear","scary","dark",
-        "logo","text","brand","war"
+        "blood", "kill", "dead", "violence", "weapon", "fight", "monster", "ghost", "drug", "alcohol",
+        "beer", "wine", "sex", "photo", "realistic", "photoreal", "gore", "fear", "scary", "dark",
+        "logo", "text", "brand", "war"
     ]
     replace = {
         "monster": "friendly imaginary friend",
@@ -60,16 +59,17 @@ def sanitize_caption(caption: str, name="child", age="8", gender="child"):
     if len(words) > 28:
         caption = " ".join(words[:28])
 
-    tail = ", same character and same world, consistent outfit and hairstyle, pastel tone, soft watercolor storybook style, child-friendly, no text, no logos"
+    tail = ", same character and world, consistent outfit and hairstyle, pastel tone, soft watercolor storybook style, child-friendly, no text, no logos"
     if "storybook" not in caption.lower():
         caption += tail
 
     if not re.search(r"\b\d+[- ]?year[- ]?old\b|\b세\b", caption):
         caption = f"{age}-year-old {gender} named {name}, " + caption
+
     return caption
 
 # ───────────────────────────────
-# GPT에게 그림 장면 묘사 요청 (문단 기반)
+# GPT에게 장면 묘사 요청 (이미지 프롬프트)
 # ───────────────────────────────
 def describe_scene(paragraph, name, age, gender, scene_index=0):
     try:
@@ -133,8 +133,7 @@ def generate_story():
 
         prompt = f"""
 너는 ‘훈육 동화봇’이라는 이름을 가진 이야기 마법사야.
-너의 임무는 5~9세 어린이를 위한 따뜻하고 공감 가는 동화를 만드는 거야.
-아래 정보를 바탕으로, 아이가 스스로 느끼고 배울 수 있는 훈육 동화를 써줘.
+아래 정보를 바탕으로, 아이가 공감하고 배울 수 있는 따뜻한 동화를 써줘.
 
 🧒 입력 정보:
 - 이름: {name}
@@ -144,19 +143,18 @@ def generate_story():
 
 🎯 목표:
 - ‘가르침’이 아닌 ‘이해와 공감’으로 배우게 해줘.
-- 아이의 감정에 초점을 맞추고, 반복과 리듬을 살려 자연스럽게 몰입하게 해줘.
-- 이야기 중간마다 귀여운 동물, 장난감, 자연 요소를 활용해서 상상력을 자극해줘.
+- 반복과 감정을 살리고, 귀여운 상상 요소를 추가해줘.
 
 📘 동화 구성 형식:
 1. 제목
 2. 목차 (총 5개 챕터 제목)
-3. 주인공 정보 요약 (이름/나이/성별)
-4. 각 챕터는 다음 순서로:
-   - ✍️ 챕터 번호 + 제목
-   - 2~3문장 내외의 따뜻한 이야기
-   - 🖼 삽화 설명 (동화적이고 상상력 넘치게)
+3. 주인공 요약
+4. 각 챕터는:
+   - 제목
+   - 2~3문장 내외 이야기
+   - 삽화 설명
 
-출력 형식은 아래 JSON 형식으로 해줘:
+출력 형식:
 ```json
 {{
   "title": "동화 제목",
@@ -167,11 +165,6 @@ def generate_story():
       "illustration": "삽화 설명"
     }},
     ...
-    {{
-      "title": "5장 제목",
-      "paragraph": "결말 내용",
-      "illustration": "삽화 설명"
-    }}
   ],
   "character": {{
     "name": "{name}",
@@ -184,7 +177,7 @@ def generate_story():
         res = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "너는 어린이를 위한 따뜻한 훈육 동화를 만드는 이야기 마법사야."},
+                {"role": "system", "content": "너는 어린이 훈육 동화를 만드는 이야기 마법사야."},
                 {"role": "user", "content": prompt.strip()}
             ],
             temperature=0.9,
