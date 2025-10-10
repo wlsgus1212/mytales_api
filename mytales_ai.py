@@ -38,9 +38,9 @@ REPLACE = {
 }
 
 STYLE_CONSTRAINTS = (
-    "hand-drawn 2D storybook illustration; soft pastel palette; consistent linework and line thickness across all images; "
-    "gentle watercolor texture; flat clean shading; same artist style across all images; identical facial features and proportions across scenes; "
-    "identical outfit and hairstyle across scenes; NO photorealism; NO comic panels; NO speech bubbles; NO text; NO logos; child-safe"
+    "Hand-drawn 2D storybook illustration, soft pastel palette, consistent linework and line thickness across all images, "
+    "gentle watercolor texture, flat clean shading, same artist style across all images, identical facial features and proportions across scenes, "
+    "identical outfit and hairstyle across scenes, NO photorealism, NO comic panels, NO speech bubbles, NO text, NO logos, remove labels, child-safe"
 )
 
 # ───────────────────────────────
@@ -50,18 +50,20 @@ def format_child_name(name: str) -> str:
     if not name:
         return name
     last_char = name[-1]
-    last_code = ord(last_char) - 0xAC00
-    has_final = (last_code % 28) != 0
-    return f"{name}이는" if has_final else f"{name}는"
+    try:
+        last_code = ord(last_char) - 0xAC00
+        has_final = (last_code % 28) != 0
+        return f"{name}이는" if has_final else f"{name}는"
+    except Exception:
+        return f"{name}는"
 
 def ensure_visual_dict(visual_field):
     if isinstance(visual_field, dict):
         return visual_field
     if isinstance(visual_field, str) and visual_field.strip():
         v = visual_field.strip()
-        # 간단 파싱: 문자열을 hair/face로 재활용
         return {
-            "face": v if len(v) <= 40 else v[:40],
+            "face": v if len(v) <= 60 else v[:60],
             "eyes": "warm brown almond eyes",
             "nose": "small button nose",
             "hair": v,
@@ -96,8 +98,12 @@ def sanitize_caption(caption: str, name="child", age="8", gender="child"):
     for k in BANNED:
         caption = re.sub(rf"\b{re.escape(k)}\b", "", caption, flags=re.I)
 
-    text_terms = ["speech", "speech bubble", "speech-bubble", "speechbubble",
-                  "speechballoon", "bubble", "caption", "text", "words", "lettering"]
+    text_terms = [
+        "speech", "speech bubble", "speech-bubble", "speechbubble", "speechballoon",
+        "bubble", "caption", "text", "words", "lettering",
+        "label", "labelled", "labeling", "header", "subtitle", "above", "below",
+        "read photo", "photo charts", "read photo charts"
+    ]
     for t in text_terms:
         caption = re.sub(rf"\b{re.escape(t)}\b", "", caption, flags=re.I)
 
@@ -172,7 +178,7 @@ def describe_scene(paragraph: str, character_profile: dict, scene_index=0):
 You are an expert children's illustrator. For the following short scene, return a single concise English sentence suitable for image generation. Return only one sentence, no extra JSON, no lists, no code blocks, and do not include any written text or speech bubbles in the sentence.
 Character: {age}-year-old {gender} named {name_en}, outfit and hairstyle: {style_desc}.
 Scene text: "{paragraph}"
-Constraints: child-friendly; focus on a single clear action or moment; do not include words like 'speech', 'bubble', 'caption', or any written text.
+Constraints: child-friendly; focus on a single clear action or moment; do not include words like 'speech', 'bubble', 'caption', 'label', 'photo', or any written text.
 """
         res = client.chat.completions.create(
             model="gpt-4o",
@@ -180,7 +186,7 @@ Constraints: child-friendly; focus on a single clear action or moment; do not in
                 {"role": "system", "content": "You are an expert children's illustrator."},
                 {"role": "user", "content": prompt.strip()}
             ],
-            temperature=0.15,
+            temperature=0.12,
             max_tokens=120,
         )
         raw = res.choices[0].message.content.strip()
@@ -188,10 +194,10 @@ Constraints: child-friendly; focus on a single clear action or moment; do not in
 
         raw = re.sub(r"```.*?```", "", raw, flags=re.S).strip()
         sentence = raw.splitlines()[0].split(".")[0].strip()
-        if not sentence:
+        if not sentence or re.search(r"(label|photo|chart|read photo|read photo charts|가-힣)", sentence, flags=re.I):
             sentence = f"{age}-year-old child named {name_en} in a gentle watercolor scene"
 
-        sentence = re.sub(r"\b(speech|bubble|caption|text|lettering)\b", "", sentence, flags=re.I).strip()
+        sentence = re.sub(r"\b(speech|bubble|caption|text|lettering|label|photo|chart)\b", "", sentence, flags=re.I).strip()
         sanitized = sanitize_caption(sentence, name=name_en, age=age, gender=gender)
         final_prompt = build_image_prompt(sanitized, character_profile)
         log.info("describe_scene final image prompt: %s", final_prompt)
@@ -281,32 +287,52 @@ Do not include any extra text outside the JSON.
         return jsonify({"error": str(e)}), 500
 
 # ───────────────────────────────
-# generate-image: accepts scene sentence + character_profile OR final prompt
+# generate-image: scene + character OR final prompt, allow_text handling
 # ───────────────────────────────
 @app.post("/generate-image")
 def generate_image():
     try:
         data = request.get_json(force=True)
-        prompt = (data.get("prompt") or "").strip()
+        scene_sentence = (data.get("prompt") or "").strip()
         character = data.get("character")
+        allow_text = bool(data.get("allow_text", False))
+        dialogue_text = (data.get("dialogue_text") or "").strip()
 
-        if not prompt:
+        if not scene_sentence:
             return jsonify({"error": "prompt is required"}), 400
 
-        if character and isinstance(character, dict):
-            # ensure visual dict
-            if not isinstance(character.get("visual"), dict):
-                character["visual"] = ensure_visual_dict(character.get("visual"))
-            final_prompt = build_image_prompt(prompt, character)
-        else:
-            final_prompt = sanitize_caption(prompt, name="child", age="8", gender="child")
+        if isinstance(character, dict) and not isinstance(character.get("visual"), dict):
+            character["visual"] = ensure_visual_dict(character.get("visual"))
 
-        if re.search(r"[가-힣]", final_prompt):
-            cp = character or {}
-            name_en = cp.get("name_en", "Child")
-            age = cp.get("age", "8")
-            scene_sentence = re.sub(r"[가-힣]", "", prompt)[:120].strip() or "a gentle storybook scene"
-            final_prompt = build_image_prompt(scene_sentence, cp if cp else {"name_en": name_en, "age": age, "visual": {}})
+        if allow_text:
+            if not dialogue_text:
+                return jsonify({"error":"dialogue_text required when allow_text is true"}), 400
+            if re.search(r"[가-힣]", dialogue_text):
+                return jsonify({"error":"dialogue_text must be English only"}), 400
+            if len(dialogue_text) > 140:
+                return jsonify({"error":"dialogue_text too long (max 140 chars)"}), 400
+
+        scene_for_prompt = re.sub(r'["\'`<>]', "", scene_sentence).strip()
+        if character and isinstance(character, dict):
+            final_prompt = build_image_prompt(scene_for_prompt, character)
+        else:
+            minimal_cp = {"name_en":"Child","age":"8","visual":{}}
+            final_prompt = build_image_prompt(scene_for_prompt, minimal_cp)
+
+        if allow_text:
+            safe_dialogue = dialogue_text.replace('\\', '\\\\').replace('"', '\\"')
+            text_instr = (
+                f' Include the exact English text: "{safe_dialogue}" as a small printed label on a paper card or wooden sign held by a toy; '
+                "do not use speech bubbles; text must be legible and in English only"
+            )
+            final_prompt = re.sub(r'\bno text\b,?', '', final_prompt, flags=re.I)
+            final_prompt = final_prompt.rstrip(", ") + ", " + text_instr
+        else:
+            if 'no text' not in final_prompt.lower():
+                final_prompt = final_prompt + ", no text, no speech bubbles, no captions"
+
+        final_prompt = re.sub(r'\s{2,}', ' ', final_prompt).strip()
+        final_prompt = re.sub(r',\s*,+', ',', final_prompt)
 
         log.info("generate-image final prompt: %s", final_prompt)
 
@@ -318,12 +344,15 @@ def generate_image():
             url = r.data[0].url
             return jsonify({"image_url": url, "used_prompt": final_prompt}), 200
         except Exception:
-            log.warning("generate-image primary attempt failed, retrying with stronger no-text clause")
-            simplified = final_prompt + ", no text, no speech bubbles, no captions"
+            log.warning("generate-image attempt failed, retrying with modified prompt")
+            if allow_text:
+                retry_prompt = final_prompt
+            else:
+                retry_prompt = final_prompt + ", no text, no speech bubbles, no captions"
             try:
-                r2 = attempt(simplified)
+                r2 = attempt(retry_prompt)
                 url = r2.data[0].url
-                return jsonify({"image_url": url, "used_prompt": simplified}), 200
+                return jsonify({"image_url": url, "used_prompt": retry_prompt}), 200
             except Exception:
                 log.error("generate-image all attempts failed: %s", traceback.format_exc())
                 return jsonify({"error": "image generation failed"}), 500
