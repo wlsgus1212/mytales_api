@@ -74,57 +74,51 @@ def sanitize_caption(caption: str, name="child", age="8", gender="child"):
 # GPT를 활용한 이미지 프롬프트 생성 (동화 문단 기반 시각화)
 def describe_scene(paragraph, name, age, gender, scene_index=0):
     try:
-        prompt = f"""
-You are a professional illustrator assistant for children's storybooks.
+        system_role = "너는 동화 일러스트 작가야. 장면을 눈앞에 보이는 것처럼 설명해줘."
 
-🎯 TASK:
-Based on the following short story paragraph, write **one highly detailed sentence** describing the scene
-as if you're instructing a storybook illustrator what to draw.
+        user_prompt = f"""
+📖 장면 설명을 생성해주세요:
 
-Include:
-- Action: What is the child doing?
-- Emotion: What is the child feeling?
-- Environment: Where is the scene taking place?
-- Details: Colors, lighting, objects, time of day, season, magical or imaginative elements
+- 대상: {age}세 {gender} 아이, 이름은 {name}
+- 의상: 노란 셔츠, 파란 멜빵바지, 짧고 곱슬한 갈색 머리
+- 문단 내용: "{paragraph}"
 
-📘 CHARACTER INFO:
-- Name: {name}
-- Age: {age}
-- Gender: {gender}
-- Appearance: Always wears a yellow shirt and blue overalls, with short wavy brown hair
-- Keep this character design consistent
+🎯 목표:
+- 아이가 무엇을 하고 있는지, 어떤 감정인지, 어디 있는지를 묘사해줘
+- 배경, 소품, 시간대, 계절, 상상 요소도 포함
+- 너무 복잡하지 않게, 어린이 책 일러스트처럼
+- 결과는 한국어 1문장 → 영어 번역 1문장
 
-📖 STORY PARAGRAPH:
-"{paragraph}"
-
-📸 OUTPUT:
-Write one English sentence suitable as a prompt for DALL·E 3.
-Make it vivid, child-friendly, pastel tone, watercolor, storybook illustration, consistent character design.
-Do not include any unsafe or forbidden elements.
-
-Example:
-"A 6-year-old girl named Mina with short wavy brown hair, wearing a yellow shirt and blue overalls, is laughing as she jumps over a puddle in a sunny park, surrounded by playful ducks and cherry blossoms in a pastel watercolor storybook style."
-
-→ Now generate one like this based on the above paragraph.
+✍️ 출력 예시 형식:
+한국어: ...
+English: ...
 """
 
         res = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are an expert in storybook illustration prompt writing."},
-                {"role": "user", "content": prompt.strip()}
+                {"role": "system", "content": system_role},
+                {"role": "user", "content": user_prompt.strip()}
             ],
             temperature=0.7,
-            max_tokens=400,
+            max_tokens=600,
         )
 
-        caption = res.choices[0].message.content.strip()
-        return sanitize_caption(caption, name, age, gender)
+        content = res.choices[0].message.content.strip()
+
+        # 영어 문장만 추출
+        match = re.search(r"English\s*[:：]\s*(.+)", content)
+        if not match:
+            raise ValueError("❌ 영어 문장 추출 실패: GPT 응답\n" + content)
+
+        english_caption = match.group(1).strip()
+        return sanitize_caption(english_caption, name, age, gender)
 
     except Exception as e:
-        log.error("❌ describe_scene GPT 호출 실패: %s", traceback.format_exc())
-        fallback = f"{age}-year-old {gender} named {name}, smiling in a cozy pastel storybook scene, watercolor style"
+        log.error("❌ describe_scene GPT 실패: %s", traceback.format_exc())
+        fallback = f"{age}-year-old {gender} named {name}, smiling in a cozy storybook scene, watercolor style"
         return sanitize_caption(fallback, name, age, gender)
+
 
 
 # ───────────────────────────────
