@@ -41,19 +41,26 @@ def generate_character_profile(name, age, gender):
     }
 
 # ───────────────────────────────
-# 장면 설명 문장 생성
+# 장면 설명 문장 생성 (맥락 + 연결성 반영)
 # ───────────────────────────────
-def describe_scene(paragraph, character_profile):
+def describe_scene(paragraph, character_profile, previous_scenes):
     name = character_profile.get("name_en", "Child")
     age = character_profile.get("age", "8")
     gender = character_profile.get("gender", "child")
     style = character_profile.get("style", "")
 
+    context = " ".join(previous_scenes) if previous_scenes else "This is the beginning of the story."
+
     prompt = f"""
-You are an expert children's illustrator. Given the following story scene, write one vivid and detailed English sentence that describes the exact moment to illustrate. 
-Include the character's emotion, action, and background. Avoid generic phrases. Do not include any written text or speech bubbles.
-Character: {age}-year-old {gender} named {name}, outfit and hairstyle: {style}.
-Scene: "{paragraph}"
+You are an expert children's illustrator. 
+The story so far: {context}
+Now the next scene is: "{paragraph}"
+
+Write one vivid and detailed English sentence that describes the exact moment to illustrate. 
+Include the character's emotion, action, and background. 
+Maintain consistency with the character's appearance: {age}-year-old {gender} named {name}, outfit and hairstyle: {style}.
+Ensure the illustration connects smoothly with the previous scenes.
+Do not include any written text or speech bubbles.
 """
 
     res = client.chat.completions.create(
@@ -62,7 +69,7 @@ Scene: "{paragraph}"
             {"role": "system", "content": "You are an expert children's illustrator."},
             {"role": "user", "content": prompt.strip()}
         ],
-        temperature=0.2,
+        temperature=0.3,
         max_tokens=120,
     )
 
@@ -71,7 +78,7 @@ Scene: "{paragraph}"
     return sentence
 
 # ───────────────────────────────
-# 이미지 프롬프트 생성
+# 이미지 프롬프트 생성 (캐릭터 고정)
 # ───────────────────────────────
 def build_image_prompt(scene_sentence, character_profile):
     visual = character_profile.get("visual", {})
@@ -87,8 +94,9 @@ def build_image_prompt(scene_sentence, character_profile):
 
     prompt = (
         f"Scene: {scene_sentence}. "
-        f"The character is a {age}-year-old {gender} named {name}, with {face}, {hair}, {eyes}, wearing {outfit}. "
-        f"Use soft watercolor style, warm lighting, and child-friendly tone. No text or speech bubbles."
+        f"The character is a {age}-year-old {gender} named {name}, with {face}, {hair}, {eyes}, wearing {outfit}, {proportions}. "
+        f"Use soft watercolor style, warm lighting, and child-friendly tone. "
+        f"Maintain consistency with previous illustrations. No text or speech bubbles."
     )
     return prompt.strip()
 
@@ -115,7 +123,11 @@ def generate_story():
         f"{name} smiles softly as a warm breeze enters the room, brushing her hair."
     ]
 
-    image_descriptions = [describe_scene(p, character_profile) for p in story_paragraphs]
+    image_descriptions = []
+    for i, p in enumerate(story_paragraphs):
+        prev = image_descriptions[:i]  # 이전 장면들
+        desc = describe_scene(p, character_profile, prev)
+        image_descriptions.append(desc)
 
     return jsonify({
         "story": story_paragraphs,
@@ -137,7 +149,6 @@ def generate_image():
 
     prompt = build_image_prompt(scene_description, character_profile)
 
-    # OpenAI 이미지 생성 호출
     res = client.images.generate(
         model="dall-e-3",
         prompt=prompt,
@@ -148,3 +159,9 @@ def generate_image():
 
     image_url = res.data[0].url
     return jsonify({"image_url": image_url})
+
+# ───────────────────────────────
+# 앱 실행
+# ───────────────────────────────
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
