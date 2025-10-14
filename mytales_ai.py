@@ -2,46 +2,35 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-import os, random, re, logging
+import os, re, random, logging
 
-# ───────────────────────────────
-# 환경 설정
-# ───────────────────────────────
+# ─────────────────────────────────────────────
+# 📌 1. 기본 설정
+# ─────────────────────────────────────────────
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
-    raise RuntimeError("❌ OPENAI_API_KEY not found in .env")
+    raise RuntimeError("OPENAI_API_KEY is missing in .env")
 
 client = OpenAI(api_key=API_KEY)
 app = Flask(__name__)
 CORS(app)
-
 logging.basicConfig(level=logging.INFO)
 
-# ───────────────────────────────
-# 한글 이름 조사 자동 처리 함수 (은/는, 이/가 등)
-# ───────────────────────────────
-def format_korean_name_with_josa(name, josa_pair=("은", "는")):
-    code = ord(name[-1]) - 0xAC00
-    if code < 0 or code > 11171:
-        return name + josa_pair[1]
-    return name + (josa_pair[0] if code % 28 else josa_pair[1])
-
-# ───────────────────────────────
-# 캐릭터 설정 생성
-# ───────────────────────────────
+# ─────────────────────────────────────────────
+# 📌 2. 캐릭터 프로필 생성 함수
+# ─────────────────────────────────────────────
 def generate_character_profile(name, age, gender):
     hair_options = ["짧은 갈색 곱슬머리", "긴 생머리 검은 머리", "웨이비한 밤색 머리"]
     outfit_options = ["노란 셔츠와 파란 멜빵", "빨간 물방울무늬 원피스", "초록 후드와 베이지 팬츠"]
     hair = random.choice(hair_options)
     outfit = random.choice(outfit_options)
-    style = f"{hair}, 착용: {outfit}"
 
     return {
         "name_en": name,
         "age": age,
         "gender": gender,
-        "style": style,
+        "style": f"{hair}, 착용: {outfit}",
         "visual": {
             "face": "부드러운 볼의 둥근 얼굴",
             "eyes": "따뜻한 갈색 아몬드형 눈",
@@ -51,68 +40,60 @@ def generate_character_profile(name, age, gender):
         }
     }
 
-# ───────────────────────────────
-# 장면 설명 생성
-# ───────────────────────────────
-def describe_scene(paragraph, character_profile, previous_scenes_text):
+# ─────────────────────────────────────────────
+# 📌 3. 시각 묘사 문장 생성 (GPT-4o)
+# ─────────────────────────────────────────────
+def describe_scene(paragraph, character_profile, context=""):
     name = character_profile.get("name_en", "아이")
-    age = character_profile.get("age", "8")
+    age = character_profile.get("age", "7")
     gender = character_profile.get("gender", "아이")
     style = character_profile.get("style", "")
 
-    context = previous_scenes_text if previous_scenes_text else "이야기의 시작 장면입니다."
-
     prompt = f"""
-당신은 어린이 그림책 일러스트 전문가입니다.
-지금까지의 이야기 요약: {context}
-다음 장면: "{paragraph}"
+당신은 '훈육 동화봇'을 위한 그림책 일러스트레이터입니다.
+주어진 이야기 문장을 바탕으로 시각적 장면을 한 문장으로 묘사해주세요.
 
-이 장면을 그대로 묘사한 한 문장의 한국어 일러스트 설명을 작성하세요.
-- 캐릭터의 감정, 행동, 배경을 생생하고 구체적으로 포함하세요.
-- 캐릭터 외형을 유지하세요: {age}살 {gender} {name}, 복장과 헤어스타일: {style}.
-- 자연스럽고 따뜻한 톤, 아이 친화적으로 묘사하세요.
-- 텍스트, 말풍선, 자막은 포함하지 마세요.
+[이야기 흐름]: {context}
+[이번 문장]: "{paragraph}"
+[캐릭터 외형]: {age}살 {gender} {name}, 복장과 머리: {style}
+
+🧾 조건:
+- 감정, 동작, 배경을 모두 포함
+- 수채화 일러스트처럼 부드럽고 아동 친화적인 묘사
+- 텍스트나 말풍선 절대 포함하지 말 것
+- 같은 캐릭터 스타일을 유지할 것
 """
 
     res = client.chat.completions.create(
         model="gpt-4o",
         messages=[
-            {"role": "system", "content": "You are an expert children's illustrator who writes concise Korean visual descriptions."},
+            {"role": "system", "content": "You write concise Korean image descriptions for watercolor children's picture books."},
             {"role": "user", "content": prompt.strip()}
         ],
-        temperature=0.3,
-        max_tokens=180,
+        temperature=0.4,
+        max_tokens=200
     )
 
     sentence = res.choices[0].message.content.strip()
-    sentence = re.sub(r"[\"<>]", "", sentence)
-    return sentence
+    return re.sub(r"[\"<>]", "", sentence)
 
-# ───────────────────────────────
-# 이미지 프롬프트 생성
-# ───────────────────────────────
-def build_image_prompt(scene_sentence, character_profile):
-    visual = character_profile.get("visual", {})
+# ─────────────────────────────────────────────
+# 📌 4. 이미지 프롬프트 생성
+# ─────────────────────────────────────────────
+def build_image_prompt(scene_description, character_profile):
+    v = character_profile.get("visual", {})
     name = character_profile.get("name_en", "아이")
-    age = character_profile.get("age", "8")
-    gender = character_profile.get("gender", "아이")
-
-    face = visual.get("face", "")
-    eyes = visual.get("eyes", "")
-    hair = visual.get("hair", "")
-    outfit = visual.get("outfit", "")
-    proportions = visual.get("proportions", "")
-
     prompt = (
-        f"장면 묘사: {scene_sentence}. "
-        f"주인공은 {age}살 {gender} {name}이며, 외형: {face}, {hair}, {eyes}, 복장: {outfit}, 비율: {proportions}. "
-        f"부드러운 수채화 스타일, 따뜻한 조명, 아동 친화적, 일관된 외형 유지, 텍스트나 말풍선 없음."
+        f"장면 묘사: {scene_description}. "
+        f"주인공: {character_profile['age']}살 {character_profile['gender']} {name}, 외형: {v.get('face')}, {v.get('hair')}, {v.get('eyes')}, "
+        f"복장: {v.get('outfit')}, 비율: {v.get('proportions')}. "
+        f"부드러운 수채화 스타일, 아동 친화적, 따뜻한 조명, 일관된 스타일 유지, 텍스트 및 말풍선 제외."
     )
     return prompt.strip()
 
-# ───────────────────────────────
-# 동화 생성 엔드포인트
-# ───────────────────────────────
+# ─────────────────────────────────────────────
+# 📌 5. /generate-story : 동화 생성
+# ─────────────────────────────────────────────
 @app.post("/generate-story")
 def generate_story():
     data = request.get_json(force=True)
@@ -126,80 +107,71 @@ def generate_story():
 
     character_profile = generate_character_profile(name, age, gender)
 
-    story_prompt = f"""
-다음 정보를 바탕으로 어린이 동화의 핵심 장면 3개를 '한국어'로 각각 한 문장씩 만들어 주세요.
-각 문장은 그림책 일러스트 한 장면을 묘사할 수 있도록 시각적이어야 합니다.
+    prompt = f"""
+당신은 '훈육 동화봇'이라는 이름의 이야기 마법사입니다.
+아래 정보를 바탕으로 5~9세 어린이를 위한 훈육 동화를 만들어주세요.
 
-캐릭터: 이름={name}, 나이={age}세, 성별={gender}.
-교육 목표: {goal}.
+👶 이름: {name}, 나이: {age}, 성별: {gender}
+🎯 훈육 주제: {goal}
+
+📝 동화는 아래 구조로 작성합니다:
+1. 도입 – 주인공 소개 및 상황
+2. 갈등 – 문제 발생
+3. 도움 – 조력자 등장
+4. 해결 – 주인공의 변화
+5. 마무리 – 감정 표현과 교훈
+
+조건:
+- 각 장은 2~4문장
+- 감정 표현 중심, 반복 구조 포함
+- 귀여운 상상 요소 포함 (동물, 장난감 등)
+- 따뜻하고 아동 친화적인 말투
+- 각 장면 뒤에 삽화 설명 1줄 포함
+- JSON으로 반환: title, character, chapters (array of {title, paragraph, illustration})
 """
 
     res = client.chat.completions.create(
         model="gpt-4o",
         messages=[
-            {"role": "system", "content": "You generate concise Korean story scene sentences for children's picture books."},
-            {"role": "user", "content": story_prompt.strip()}
+            {"role": "system", "content": "너는 어린이를 위한 따뜻한 훈육 동화를 쓰는 이야기 마법사야."},
+            {"role": "user", "content": prompt.strip()}
         ],
-        temperature=0.6,
-        max_tokens=600,
+        temperature=0.9,
+        max_tokens=1800
     )
 
     raw = res.choices[0].message.content.strip()
+    import json
+    story_data = json.loads(re.sub(r"```json|```", "", raw).strip())
 
-    # 줄바꿈 기준 우선 → 없으면 종결 문장 기준
-    if "\n" in raw:
-        story_paragraphs = [s.strip() for s in raw.strip().split("\n") if s.strip()]
-    else:
-        story_paragraphs = re.findall(r'[^.!?]+[.!?]', raw.strip())
-
-    # 예외 처리: 문장이 부족할 경우 기본 예시
-    if len(story_paragraphs) < 3:
-        base_name = format_korean_name_with_josa(name)
-        story_paragraphs = [
-            f"{base_name} 노란 램프 아래에서 조용히 책을 들여다본다.",
-            f"창밖에 빗방울이 떨어지고, {base_name} 창밖을 응시하며 생각에 잠긴다.",
-            f"따뜻한 바람이 불어와 {base_name} 머리카락을 살랑거리게 한다."
-        ]
-
-    # 장면별 묘사 생성
+    # 삽화 프롬프트 생성
     image_descriptions = []
-    accumulated_text = ""
-    for p in story_paragraphs:
-        desc = describe_scene(p, character_profile, accumulated_text)
-        image_descriptions.append(desc)
-        accumulated_text = (accumulated_text + " " + p).strip()
+    image_prompts = []
+    accumulated_context = ""
 
-    # 이미지 생성용 프롬프트
-    image_prompts = [build_image_prompt(desc, character_profile) for desc in image_descriptions]
+    for chapter in story_data["chapters"]:
+        desc = describe_scene(chapter["paragraph"], character_profile, accumulated_context)
+        image_descriptions.append(desc)
+        image_prompts.append(build_image_prompt(desc, character_profile))
+        accumulated_context += chapter["paragraph"] + " "
 
     return jsonify({
-        "story": story_paragraphs,
+        "title": story_data.get("title"),
         "character_profile": character_profile,
+        "story": [c["paragraph"] for c in story_data["chapters"]],
         "image_descriptions": image_descriptions,
         "image_prompts": image_prompts
     })
 
-# ───────────────────────────────
-# 이미지 생성 엔드포인트
-# ───────────────────────────────
+# ─────────────────────────────────────────────
+# 📌 6. /generate-image : 이미지 생성
+# ─────────────────────────────────────────────
 @app.post("/generate-image")
 def generate_image():
     data = request.get_json(force=True)
-    logging.info("DEBUG /generate-image payload: %s", data)
-
-    character_profile = data.get("character_profile") or data.get("characterProfile")
-    scene_description = data.get("image_description") or data.get("imageDescription") or data.get("scene_sentence") or data.get("sceneSentence")
-
-    if not character_profile or not scene_description:
-        return jsonify({
-            "error": "캐릭터 정보와 장면 설명이 필요합니다.",
-            "received": {
-                "character_profile": bool(character_profile),
-                "scene_description": bool(scene_description)
-            }
-        }), 400
-
-    prompt = build_image_prompt(scene_description, character_profile)
+    prompt = data.get("prompt")
+    if not prompt:
+        return jsonify({"error": "prompt is required"}), 400
 
     try:
         res = client.images.generate(
@@ -209,21 +181,14 @@ def generate_image():
             quality="standard",
             n=1
         )
-
-        image_url = res.data[0].url if res and getattr(res, "data", None) else None
-
-        if not image_url:
-            logging.error("❌ DALL·E 응답에 URL 없음: %s", res)
-            return jsonify({"error": "이미지 생성 실패"}), 500
-
-        return jsonify({"image_url": image_url, "prompt_used": prompt})
-
+        url = res.data[0].url
+        return jsonify({"image_url": url, "used_prompt": prompt})
     except Exception as e:
-        logging.exception("❌ 이미지 생성 중 오류 발생")
-        return jsonify({"error": str(e)}), 500
+        logging.error("Image generation failed: %s", str(e))
+        return jsonify({"error": "이미지 생성 실패"}), 500
 
-# ───────────────────────────────
-# 앱 실행
-# ───────────────────────────────
+# ─────────────────────────────────────────────
+# 📌 7. 서버 실행
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
