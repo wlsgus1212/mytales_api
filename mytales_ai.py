@@ -138,7 +138,6 @@ def build_image_prompt_kor(scene_sentence, character_profile, scene_index, previ
 
 # ───────────────────────────────
 # 엔드포인트: /generate-story
-# GPT로 동화 텍스트 + image prompt만 생성
 # ───────────────────────────────
 @app.post("/generate-story")
 def generate_story():
@@ -188,10 +187,21 @@ def generate_image():
     scene_description = (data.get("image_description") or data.get("scene") or "")
     scene_index = data.get("scene_index") or 1
 
-    if not character_profile or not scene_description:
-        return jsonify({"error": "character_profile과 scene_description 필수"}), 400
+    # 문자열이면 dict로 파싱
+    if isinstance(character_profile, str):
+        try:
+            character_profile = json.loads(character_profile)
+        except json.JSONDecodeError:
+            return jsonify({"error": "character_profile이 JSON 형식이 아닙니다."}), 400
+
+    if not isinstance(character_profile, dict):
+        return jsonify({"error": "character_profile은 dict 또는 JSON 문자열이어야 합니다."}), 400
+
+    if not scene_description:
+        return jsonify({"error": "scene_description 필수"}), 400
 
     prompt = build_image_prompt_kor(scene_description, character_profile, scene_index)
+
     try:
         res = client.images.generate(
             model="dall-e-3",
