@@ -2,11 +2,11 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-import os, random, re, logging, json, time
+import os, random, re, logging, json
 
-# ───────────────────────────────
+# ──────────────
 # 환경 설정
-# ───────────────────────────────
+# ──────────────
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
@@ -17,26 +17,19 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# ───────────────────────────────
+# ──────────────
 # 유틸 함수
-# ───────────────────────────────
+# ──────────────
 def clean_text(s):
     return re.sub(r'[\"<>]', '', (s or "")).strip()
-
-def split_sentences_kor(text, expected=5):
-    parts = [p.strip() for p in re.split(r'\n+|(?<=\.)\s+|(?<=\?|!)\s+', text) if p.strip()]
-    if len(parts) < expected:
-        joined = " ".join(parts)
-        parts = [joined] if joined else []
-    return parts
 
 def count_self_choice_indicators(text):
     indicators = ["한 번", "한입", "한 입", "냄새", "손끝", "손가락", "스스로", "직접", "시도", "골라", "골라보다", "조심스레", "조심히", "다시 한 번", "다시 한입"]
     return sum(text.count(ind) for ind in indicators)
 
-# ───────────────────────────────
+# ──────────────
 # 캐릭터 프로필 생성
-# ───────────────────────────────
+# ──────────────
 def generate_character_profile(name, age, gender):
     hair = random.choice(["짧은 갈색 곱슬머리", "긴 검은 생머리", "웨이브 밤색 머리"])
     outfit = random.choice(["노란 셔츠와 파란 멜빵", "빨간 물방울무늬 원피스", "초록 후드와 베이지 팬츠"])
@@ -57,9 +50,9 @@ def generate_character_profile(name, age, gender):
         }
     }
 
-# ───────────────────────────────
-# 동화 텍스트 생성 (GPT)
-# ───────────────────────────────
+# ──────────────
+# 동화 텍스트 생성
+# ──────────────
 def generate_story_text(name, age, gender, topic, max_attempts=2):
     base_prompt = f"""
 당신은 '훈육 동화봇'입니다. 대상은 5~9세 아동이며, 말투는 따뜻하고 리드미컬합니다.
@@ -77,7 +70,7 @@ def generate_story_text(name, age, gender, topic, max_attempts=2):
 {{"title":"", "character":"", "chapters":[{{"title":"", "paragraph":"", "illustration":""}},...], "ending":""}}
 """
 
-    for attempt in range(max_attempts):
+    for _ in range(max_attempts):
         res = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -96,18 +89,16 @@ def generate_story_text(name, age, gender, topic, max_attempts=2):
             match = re.search(r'\{[\s\S]*\}\s*$', raw)
             data = json.loads(match.group(0)) if match else None
 
-        if not data: continue
-
-        chapters = data.get("chapters", [])
-        paragraphs = " ".join(c.get("paragraph", "") for c in chapters)
-        if len(chapters) >= 5 and count_self_choice_indicators(paragraphs) >= 2:
-            return data
+        if data and len(data.get("chapters", [])) >= 5:
+            paragraph_text = " ".join([c["paragraph"] for c in data["chapters"]])
+            if count_self_choice_indicators(paragraph_text) >= 2:
+                return data
 
     return {"title": f"{name}의 이야기", "character": f"{name} ({age} {gender})", "chapters": [], "ending": ""}
 
-# ───────────────────────────────
-# 장면 묘사 → 이미지 프롬프트 생성
-# ───────────────────────────────
+# ──────────────
+# 장면 묘사 및 이미지 프롬프트 생성
+# ──────────────
 def describe_scene_kor(scene_text, character_profile, scene_index, previous_summary):
     prompt = f"""
 당신은 어린이 그림책 일러스트 전문가입니다.
@@ -136,9 +127,9 @@ def build_image_prompt_kor(scene_sentence, character_profile, scene_index, previ
         f"스타일: {style_tags}. 카메라: 중간 샷 권장. 캐릭터 외형은 절대 변경하지 마세요. 텍스트/말풍선 금지."
     )
 
-# ───────────────────────────────
+# ──────────────
 # 엔드포인트: /generate-story
-# ───────────────────────────────
+# ──────────────
 @app.post("/generate-story")
 def generate_story():
     data = request.get_json(force=True)
@@ -176,10 +167,9 @@ def generate_story():
         "ending": story_data.get("ending")
     })
 
-# ───────────────────────────────
+# ──────────────
 # 엔드포인트: /generate-image
-# 이미지 1장씩 생성
-# ───────────────────────────────
+# ──────────────
 @app.post("/generate-image")
 def generate_image():
     data = request.get_json(force=True)
@@ -187,7 +177,6 @@ def generate_image():
     scene_description = (data.get("image_description") or data.get("scene") or "")
     scene_index = data.get("scene_index") or 1
 
-    # 문자열이면 dict로 파싱
     if isinstance(character_profile, str):
         try:
             character_profile = json.loads(character_profile)
@@ -217,8 +206,8 @@ def generate_image():
 
     return jsonify({"image_url": image_url, "prompt_used": prompt})
 
-# ───────────────────────────────
+# ──────────────
 # 앱 실행
-# ───────────────────────────────
+# ──────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
