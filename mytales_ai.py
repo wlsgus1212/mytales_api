@@ -24,7 +24,7 @@ def clean_text(s):
     return re.sub(r'[\"<>]', '', (s or "")).strip()
 
 def split_sentences_kor(text, expected=5):
-    parts = [p.strip() for p in re.split(r'\n+|(?<=\.)\s+|(?<=\?|!)\s+', text) if p.strip()]
+    parts = [p.strip() for p in re.split(r'\n+|(?<=\.)\s+|(?<=\?|!)\s+', (text or "")) if p.strip()]
     if len(parts) < expected:
         joined = " ".join(parts)
         parts = [joined] if joined else []
@@ -51,10 +51,7 @@ def ensure_character_profile(obj):
         except Exception:
             pass
         m = re.search(r'Canonical\s*Visual\s*Descriptor\s*[:\-]?\s*(.+)', s, re.IGNORECASE)
-        if m:
-            canonical = m.group(1).strip()
-        else:
-            canonical = s
+        canonical = m.group(1).strip() if m else s
         return {
             "name": None,
             "age": None,
@@ -94,7 +91,7 @@ def generate_character_profile(name, age, gender):
     }
 
 # ───────────────────────────────
-# 동화 텍스트 생성 (LLM 호출 + 강한 fallback)
+# 동화 텍스트 생성 (강한 페일백 포함)
 # ───────────────────────────────
 def generate_story_text(name, age, gender, topic, max_attempts=2):
     base_prompt = f"""
@@ -116,53 +113,54 @@ def generate_story_text(name, age, gender, topic, max_attempts=2):
                 temperature=0.6,
                 max_tokens=1100,
             )
-        except Exception as e:
+        except Exception:
             logging.exception("LLM 호출 실패")
             time.sleep(0.5)
             continue
 
-        raw = res.choices[0].message.content.strip()
+        raw = res.choices[0].message.content if getattr(res.choices[0].message, 'content', None) is not None else str(res)
+        raw = raw.strip()
         logging.info("DEBUG generate_story raw (truncated): %s", raw[:1200])
 
-        # 시도 1: 코드블럭 제거 후 JSON 파싱
+        # 1) 코드블록/마크업 제거
+        cleaned = re.sub(r"```(?:json)?", "", raw or "").strip()
+
+        # 2) 본문 내부의 JSON 객체 추출 시도
         data = None
         try:
-            cleaned = re.sub(r"```(?:json)?", "", raw).strip()
             data = json.loads(cleaned)
         except Exception:
-            # 시도 2: 본문에서 JSON 객체 추출
-            m = re.search(r'\{[\s\S]*\}\s*$', raw)
+            m = re.search(r'(\{[\s\S]*\})\s*$', cleaned)
             if m:
                 try:
-                    data = json.loads(m.group(0))
+                    data = json.loads(m.group(1))
                 except Exception:
                     data = None
 
-        # 시도 3: 느슨한 텍스트 분해 -> 강한 fallback으로 보정
-        if not data or not isinstance(data.get("chapters"), list) or len(data.get("chapters")) < 5:
-            logging.info("generate_story: LLM 출력이 불완전하거나 파싱 실패. 페일백 구성 진행.")
-            # 줄별/문장별로 파싱 시도
-            paras = split_sentences_kor(raw, expected=5)
+        # 3) JSON 불완전 시 문장 분해로 강제 구성
+        if not data or not isinstance(data.get("chapters", []), list) or len(data.get("chapters", [])) < 5:
+            paras = split_sentences_kor(cleaned, expected=5)
             chapters = []
             for i in range(5):
-                p = paras[i] if i < len(paras) else ""
-                title = f"장면 {i+1}"
-                paragraph = clean_text(p) if p else ""
-                # 일단 삽화 설명은 비워두고 이후 서버가 생성
-                chapters.append({"title": title, "paragraph": paragraph or f"{name}이(가) 작은 모험을 합니다.", "illustration": ""})
+                p = paras[i] if i < len(paras) and paras[i] else ""
+                if not p:
+                    p = f"{name}의 작은 모험 장면 {i+1}."
+                chapters.append({"title": f"장면 {i+1}", "paragraph": clean_text(p), "illustration": ""})
             data = {
-                "title": data.get("title") if isinstance(data, dict) and data.get("title") else f"{name}의 작은 모험",
+                "title": (data.get("title") if isinstance(data, dict) and data.get("title") else f"{name}의 이야기"),
                 "character": f"{name} ({age} {gender})",
                 "chapters": chapters,
                 "ending": (data.get("ending") if isinstance(data, dict) else "") or ""
             }
 
-        # 최종 검증: 챕터 수 보장 및 self-choice 인디케이터 검사(선택적)
-        chapters_joined = " ".join([c.get("paragraph","") for c in data.get("chapters",[])])
-        if len(data.get("chapters",[])) >= 5 and count_self_choice_indicators(chapters_joined) >= 0:
+        # 보장: 최소 5개 챕터
+        if isinstance(data.get("chapters"), list) and len(data["chapters"]) >= 5:
             return data
 
-    # 최종 안전 페일백 (절대 빈 챕터를 반환하지 않음)
+        logging.info("generate_story: 파싱 후 유효성 미달, 재시도 중...")
+        time.sleep(0.5)
+
+    # 최종 안전 페일백
     title = f"{name}의 작은 모험"
     chapters = [
         {"title":"1. 시작의 밤","paragraph":f"{name}은(는) 식탁 앞에서 접시를 바라보며 머뭇거렸어요; 색들이 낯설었거든요.","illustration":f"램프빛 아래 접시를 바라보는 {name}; canonical 포함."},
@@ -174,7 +172,7 @@ def generate_story_text(name, age, gender, topic, max_attempts=2):
     return {"title": title, "character": f"{name} ({age} {gender})", "chapters": chapters, "ending":"손끝엔 작은 호기심이 남아 있었어요."}
 
 # ───────────────────────────────
-# 장면 묘사(삽화 설명) 및 이미지 프롬프트 빌드 (서버가 직접 생성)
+# 장면 묘사(삽화 설명) 및 이미지 프롬프트 빌드
 # ───────────────────────────────
 def describe_scene_kor(scene_text, character_profile, scene_index, previous_summary):
     prompt = f"""
@@ -197,7 +195,7 @@ def describe_scene_kor(scene_text, character_profile, scene_index, previous_summ
         return clean_text(res.choices[0].message.content)
     except Exception:
         logging.exception("describe_scene_kor LLM 호출 실패, fallback 사용")
-        return clean_text((scene_text or "")[:120] + " ... 따뜻한 조명, 부드러운 수채화 느낌.")
+        return clean_text(((scene_text or "")[:120]) + " ... 따뜻한 조명, 부드러운 수채화 느낌.")
 
 def build_image_prompt_kor(scene_sentence, character_profile, scene_index, previous_meta=None):
     canonical = ""
@@ -214,7 +212,13 @@ def build_image_prompt_kor(scene_sentence, character_profile, scene_index, previ
     return prompt.strip()
 
 # ───────────────────────────────
-# 엔드포인트: /generate-story (반드시 모든 필드 채움)
+# 설정: 허용 이미지 사이즈
+# ───────────────────────────────
+ALLOWED_SIZES = {"1024x1024", "1024x1792", "1792x1024"}
+DEFAULT_IMAGE_SIZE = "1024x1024"
+
+# ───────────────────────────────
+# 엔드포인트: /generate-story
 # ───────────────────────────────
 @app.post("/generate-story")
 def generate_story():
@@ -230,10 +234,8 @@ def generate_story():
     character_profile = generate_character_profile(name, age, gender)
     story_data = generate_story_text(name, age, gender, topic)
 
-    # 보장: chapters (적어도 5개)
     chapters = story_data.get("chapters") or []
     if len(chapters) < 5:
-        # 매우 드문 경우를 위해 강력 페일백 채움
         paras = split_sentences_kor(" ".join([c.get("paragraph","") for c in chapters]) or "", expected=5)
         new_chapters = []
         for i in range(5):
@@ -268,7 +270,7 @@ def generate_story():
     return jsonify(response)
 
 # ───────────────────────────────
-# 엔드포인트: /generate-image (프론트가 개별 요청)
+# 엔드포인트: /generate-image
 # ───────────────────────────────
 @app.post("/generate-image")
 def generate_image():
@@ -276,6 +278,7 @@ def generate_image():
     raw_cp = data.get("character_profile") or data.get("character") or data.get("characterProfile")
     scene_description = (data.get("image_description") or data.get("scene") or data.get("scene_description") or data.get("scene_sentence") or "")
     scene_index = data.get("scene_index") or data.get("index") or 1
+    requested_size = data.get("size")
 
     character_profile = ensure_character_profile(raw_cp)
     if not character_profile:
@@ -283,20 +286,21 @@ def generate_image():
     if not scene_description:
         return jsonify({"error":"scene_description(또는 image_description/scene 등) 필수"}), 400
 
+    size_to_use = requested_size if requested_size in ALLOWED_SIZES else DEFAULT_IMAGE_SIZE
     prompt = build_image_prompt_kor(scene_description, character_profile, scene_index)
-    logging.info("DEBUG /generate-image prompt len=%d", len(prompt))
+    logging.info("DEBUG /generate-image prompt len=%d size=%s", len(prompt), size_to_use)
 
     try:
         res = client.images.generate(
             model="dall-e-3",
             prompt=prompt,
-            size="512x512",
+            size=size_to_use,
             quality="standard",
             n=1
         )
     except Exception as e:
         logging.exception("이미지 생성 API 호출 실패")
-        return jsonify({"error":"이미지 생성 API 호출 실패","detail":str(e),"prompt_used":prompt}), 500
+        return jsonify({"error":"이미지 생성 API 호출 실패","detail": str(e), "prompt_used": prompt, "size_used": size_to_use}), 500
 
     image_url = None
     try:
@@ -307,10 +311,10 @@ def generate_image():
         image_url = None
 
     if not image_url:
-        logging.error("이미지 생성 실패: URL 없음. full response: %s", str(res)[:1000])
-        return jsonify({"error":"이미지 생성 실패(응답에 URL 없음)","prompt_used":prompt}), 500
+        logging.error("이미지 생성 실패: URL 없음. full response: %s", str(res)[:2000])
+        return jsonify({"error":"이미지 생성 실패(응답에 URL 없음)","prompt_used":prompt,"size_used":size_to_use,"raw_response": str(res)[:2000]}), 500
 
-    return jsonify({"image_url": image_url, "prompt_used": prompt})
+    return jsonify({"image_url": image_url, "prompt_used": prompt, "size_used": size_to_use})
 
 # ───────────────────────────────
 # 앱 실행
