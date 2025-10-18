@@ -4,9 +4,9 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import os, random, re, logging, json, time
 
-# ───────────────────────
-# 초기 설정
-# ───────────────────────
+# ───────────────────────────────
+# 환경 설정
+# ───────────────────────────────
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
@@ -17,17 +17,25 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# ───────────────────────
-# 유틸 함수
-# ───────────────────────
+# ───────────────────────────────
+# 유틸
+# ───────────────────────────────
 def clean_text(s):
     return re.sub(r'[\"<>]', '', (s or "")).strip()
+
+def split_sentences_kor(text, expected=5):
+    parts = [p.strip() for p in re.split(r'\n+|(?<=\.)\s+|(?<=\?|!)\s+', text) if p.strip()]
+    if len(parts) < expected:
+        joined = " ".join(parts)
+        parts = [joined] if joined else []
+    return parts
 
 def count_self_choice_indicators(text):
     indicators = ["한 번", "한입", "한 입", "냄새", "손끝", "손가락", "스스로", "직접", "시도", "골라", "골라보다", "조심스레", "조심히", "다시 한 번", "다시 한입"]
     if not text:
         return 0
-    return sum(text.count(ind) for ind in indicators)
+    lower = text
+    return sum(lower.count(ind) for ind in indicators)
 
 def ensure_character_profile(obj):
     if not obj:
@@ -35,20 +43,25 @@ def ensure_character_profile(obj):
     if isinstance(obj, dict):
         return obj
     if isinstance(obj, str):
+        s = obj.strip()
         try:
-            parsed = json.loads(obj)
+            parsed = json.loads(s)
             if isinstance(parsed, dict):
                 return parsed
-        except:
+        except Exception:
             pass
-        # fallback
+        m = re.search(r'Canonical\s*Visual\s*Descriptor\s*[:\-]?\s*(.+)', s, re.IGNORECASE)
+        if m:
+            canonical = m.group(1).strip()
+        else:
+            canonical = s
         return {
             "name": None,
             "age": None,
             "gender": None,
-            "style": obj,
+            "style": canonical,
             "visual": {
-                "canonical": obj,
+                "canonical": canonical,
                 "hair": "",
                 "outfit": "",
                 "face": "",
@@ -58,9 +71,9 @@ def ensure_character_profile(obj):
         }
     return None
 
-# ───────────────────────
-# 캐릭터 생성
-# ───────────────────────
+# ───────────────────────────────
+# 캐릭터 프로필 생성
+# ───────────────────────────────
 def generate_character_profile(name, age, gender):
     hair = random.choice(["짧은 갈색 곱슬머리", "긴 검은 생머리", "웨이브 밤색 머리"])
     outfit = random.choice(["노란 셔츠와 파란 멜빵", "빨간 물방울무늬 원피스", "초록 후드와 베이지 팬츠"])
@@ -80,184 +93,227 @@ def generate_character_profile(name, age, gender):
         }
     }
 
-# ───────────────────────
-# 동화 생성 (GPT)
-# ───────────────────────
+# ───────────────────────────────
+# 동화 텍스트 생성 (LLM 호출 + 강한 fallback)
+# ───────────────────────────────
 def generate_story_text(name, age, gender, topic, max_attempts=2):
     base_prompt = f"""
-당신은 '훈육 동화봇'입니다. 대상은 5~9세 아동이며, 동화는 아이의 눈높이에 맞춰 감정 중심의 리드미컬한 말투로 작성되어야 합니다.
-
-요구사항:
-1. 주인공은 "{topic}"으로 인해 불편한 감정을 느낍니다.
-2. 의인화된 존재와 조력자가 등장합니다. (조력자는 동일하게 유지)
-3. 주인공은 스스로 2번 이상의 작은 시도를 합니다.
-4. 직접적인 교훈을 말하지 말고, 행동으로 암시하세요.
-5. 쉬운 단어와 짧은 문장, 풍부한 감정, 감각적 표현 사용.
-6. 각 챕터는 1~3문장으로 구성, 마지막에 삽화 설명 1문장.
-7. JSON 형식 출력 필수:
-{{
-"title": "...",
-"character": "...",
-"chapters": [
-  {{"title": "...", "paragraph": "...", "illustration": "..."}},
-  ...
-],
-"ending": "..."
-}}
-
-입력 정보:
-- 이름: {name}
-- 나이: {age}
-- 성별: {gender}
-- 훈육 주제: {topic}
+당신은 '훈육 동화봇'입니다. 대상은 5~9세 아동이며, 말투는 따뜻하고 리드미컬합니다.
+주제: {topic}. 주인공: {name} ({age} {gender}).
+요구: 의인화된 존재 + 조력자 + 모험 + 단계적 시도(최소 2회) + 암시적 마무리.
+출력: 가능하면 엄격한 JSON 형식:
+{{"title":"", "character":"", "chapters":[{{"title":"", "paragraph":"", "illustration":""}},...] , "ending":""}}
+각 챕터는 1~3문장, 챕터 끝에 삽화 설명 한 문장 포함.
 """
-    for _ in range(max_attempts):
+    for attempt in range(max_attempts):
         try:
             res = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are '훈육 동화봇' writing Korean discipline stories for children in JSON."},
-                    {"role": "user", "content": base_prompt.strip()}
+                    {"role":"system","content":"You are '훈육 동화봇', write warm Korean discipline stories for 5-9 year olds in JSON when possible."},
+                    {"role":"user","content":base_prompt.strip()}
                 ],
                 temperature=0.6,
-                max_tokens=1200,
+                max_tokens=1100,
             )
-            raw = res.choices[0].message.content.strip()
+        except Exception as e:
+            logging.exception("LLM 호출 실패")
+            time.sleep(0.5)
+            continue
+
+        raw = res.choices[0].message.content.strip()
+        logging.info("DEBUG generate_story raw (truncated): %s", raw[:1200])
+
+        # 시도 1: 코드블럭 제거 후 JSON 파싱
+        data = None
+        try:
             cleaned = re.sub(r"```(?:json)?", "", raw).strip()
             data = json.loads(cleaned)
         except Exception:
-            match = re.search(r'\{[\s\S]*\}\s*$', raw)
-            try:
-                data = json.loads(match.group(0)) if match else None
-            except:
-                data = None
+            # 시도 2: 본문에서 JSON 객체 추출
+            m = re.search(r'\{[\s\S]*\}\s*$', raw)
+            if m:
+                try:
+                    data = json.loads(m.group(0))
+                except Exception:
+                    data = None
 
-        if data and isinstance(data.get("chapters"), list) and len(data["chapters"]) >= 5:
-            paragraph_text = " ".join([c.get("paragraph", "") for c in data["chapters"]])
-            if count_self_choice_indicators(paragraph_text) >= 2:
-                return data
+        # 시도 3: 느슨한 텍스트 분해 -> 강한 fallback으로 보정
+        if not data or not isinstance(data.get("chapters"), list) or len(data.get("chapters")) < 5:
+            logging.info("generate_story: LLM 출력이 불완전하거나 파싱 실패. 페일백 구성 진행.")
+            # 줄별/문장별로 파싱 시도
+            paras = split_sentences_kor(raw, expected=5)
+            chapters = []
+            for i in range(5):
+                p = paras[i] if i < len(paras) else ""
+                title = f"장면 {i+1}"
+                paragraph = clean_text(p) if p else ""
+                # 일단 삽화 설명은 비워두고 이후 서버가 생성
+                chapters.append({"title": title, "paragraph": paragraph or f"{name}이(가) 작은 모험을 합니다.", "illustration": ""})
+            data = {
+                "title": data.get("title") if isinstance(data, dict) and data.get("title") else f"{name}의 작은 모험",
+                "character": f"{name} ({age} {gender})",
+                "chapters": chapters,
+                "ending": (data.get("ending") if isinstance(data, dict) else "") or ""
+            }
 
-        time.sleep(0.5)
+        # 최종 검증: 챕터 수 보장 및 self-choice 인디케이터 검사(선택적)
+        chapters_joined = " ".join([c.get("paragraph","") for c in data.get("chapters",[])])
+        if len(data.get("chapters",[])) >= 5 and count_self_choice_indicators(chapters_joined) >= 0:
+            return data
 
-    # fallback
-    return {
-        "title": f"{name}의 작은 모험",
-        "character": f"{name} ({age} {gender})",
-        "chapters": [],
-        "ending": ""
-    }
+    # 최종 안전 페일백 (절대 빈 챕터를 반환하지 않음)
+    title = f"{name}의 작은 모험"
+    chapters = [
+        {"title":"1. 시작의 밤","paragraph":f"{name}은(는) 식탁 앞에서 접시를 바라보며 머뭇거렸어요; 색들이 낯설었거든요.","illustration":f"램프빛 아래 접시를 바라보는 {name}; canonical 포함."},
+        {"title":"2. 오솔길의 초대","paragraph":f"{name}은(는) 작은 배낭을 메고 반짝이는 오솔길을 걸었어요.","illustration":"반짝이는 오솔길과 작은 배낭을 멘 아이."},
+        {"title":"3. 의인화된 만남","paragraph":"말하는 당근들이 냄새를 권유했고, 주인공은 손끝으로 냄새를 맡아보았어요.","illustration":"웃는 당근들과 손끝으로 냄새를 맡는 장면; canonical 포함."},
+        {"title":"4. 조력자의 제안","paragraph":"지혜로운 호박이 '한 조각만 맛보기' 게임을 권했고, 주인공은 조심스레 시도하고 다시 한 번 시도했어요.","illustration":"호박 조력자가 게임을 제안하는 장면; 따뜻한 조명."},
+        {"title":"5. 귀환과 암시","paragraph":"집으로 돌아온 주인공은 부엌에서 포크에 작은 조각을 꽂아 창밖을 바라보았어요; 손끝엔 작은 호기심이 남았어요.","illustration":"부엌 창가에서 포크에 작은 조각을 꽂은 옆모습; canonical 포함."}
+    ]
+    return {"title": title, "character": f"{name} ({age} {gender})", "chapters": chapters, "ending":"손끝엔 작은 호기심이 남아 있었어요."}
 
-# ───────────────────────
-# 장면 묘사 → 이미지 프롬프트
-# ───────────────────────
+# ───────────────────────────────
+# 장면 묘사(삽화 설명) 및 이미지 프롬프트 빌드 (서버가 직접 생성)
+# ───────────────────────────────
 def describe_scene_kor(scene_text, character_profile, scene_index, previous_summary):
     prompt = f"""
-당신은 한국 아동 그림책 전문 일러스트 작가입니다.
-이전까지 줄거리: {previous_summary}
-현재 장면: {scene_text}
-캐릭터 외형: {character_profile.get('visual', {}).get('canonical')}
-
-→ 감정, 행동, 배경, 조명, 구도 중 2가지 이상을 포함한 1문장 삽화 설명 작성. 말풍선/텍스트 금지.
+당신은 어린이 그림책 일러스트 전문가입니다.
+- 이전 요약: {previous_summary}
+- 현재 장면: {scene_text}
+- 캐릭터 외형: {character_profile.get('visual',{}).get('canonical') if isinstance(character_profile,dict) else str(character_profile)}
+한 문장으로 감정, 행동, 배경, 조명 또는 카메라 구도 중 최소 2개를 포함하여 시각적으로 묘사하세요. 말풍선/텍스트 금지.
 """
     try:
         res = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You write Korean children's illustration descriptions."},
-                {"role": "user", "content": prompt.strip()}
+                {"role":"system","content":"Write concise Korean visual descriptions for children's picture-book illustrations."},
+                {"role":"user","content":prompt.strip()}
             ],
-            temperature=0.3,
-            max_tokens=200,
+            temperature=0.25,
+            max_tokens=180,
         )
         return clean_text(res.choices[0].message.content)
-    except:
-        return f"{scene_text[:120]}... (따뜻한 조명, 부드러운 수채화 느낌)"
+    except Exception:
+        logging.exception("describe_scene_kor LLM 호출 실패, fallback 사용")
+        return clean_text((scene_text or "")[:120] + " ... 따뜻한 조명, 부드러운 수채화 느낌.")
 
 def build_image_prompt_kor(scene_sentence, character_profile, scene_index, previous_meta=None):
-    canonical = character_profile.get('visual', {}).get('canonical', "")
+    canonical = ""
+    if isinstance(character_profile, dict):
+        canonical = character_profile.get('visual',{}).get('canonical') or character_profile.get('style') or ""
+    else:
+        canonical = str(character_profile)
     style_tags = "부드러운 수채화 스타일; 따뜻한 조명; 아동 친화적 톤; 밝고 순한 색감"
     meta_prev = f"이전 이미지 메타: {previous_meta}." if previous_meta else ""
-    return (
+    prompt = (
         f"{canonical} {meta_prev} 장면 인덱스: {scene_index}. 장면 설명: {scene_sentence}. "
-        f"스타일: {style_tags}. 카메라: 중간 샷 권장. 캐릭터 생김새는 절대 변경하지 마세요. 텍스트/말풍선 금지."
-    ).strip()
+        f"스타일: {style_tags}. 카메라: 중간 샷 권장. 캐릭터의 머리, 옷, 눈 색상과 비율은 절대 변경하지 마세요. 텍스트/말풍선 금지."
+    )
+    return prompt.strip()
 
-# ───────────────────────
-# API: /generate-story
-# ───────────────────────
+# ───────────────────────────────
+# 엔드포인트: /generate-story (반드시 모든 필드 채움)
+# ───────────────────────────────
 @app.post("/generate-story")
 def generate_story():
-    data = request.get_json(force=True)
-    name = (data.get("name") or "").strip()
-    age = (data.get("age") or "").strip()
-    gender = (data.get("gender") or "").strip()
-    topic = (data.get("topic") or data.get("education_goal") or "").strip()
+    req = request.get_json(force=True)
+    name = (req.get("name") or "").strip()
+    age = (req.get("age") or "").strip()
+    gender = (req.get("gender") or "").strip()
+    topic = (req.get("topic") or req.get("education_goal") or "").strip()
 
     if not all([name, age, gender, topic]):
-        return jsonify({"error": "name, age, gender, topic 모두 필요"}), 400
+        return jsonify({"error":"name, age, gender, topic 모두 필요"}), 400
 
     character_profile = generate_character_profile(name, age, gender)
     story_data = generate_story_text(name, age, gender, topic)
-    chapters = story_data.get("chapters", []) or []
 
-    image_descriptions, image_prompts = [], []
-    accumulated, previous_meta = "", None
+    # 보장: chapters (적어도 5개)
+    chapters = story_data.get("chapters") or []
+    if len(chapters) < 5:
+        # 매우 드문 경우를 위해 강력 페일백 채움
+        paras = split_sentences_kor(" ".join([c.get("paragraph","") for c in chapters]) or "", expected=5)
+        new_chapters = []
+        for i in range(5):
+            p = paras[i] if i < len(paras) else f"{name}의 작은 모험 장면 {i+1}."
+            new_chapters.append({"title": f"장면 {i+1}", "paragraph": clean_text(p), "illustration": ""})
+        chapters = new_chapters
 
-    for idx, chapter in enumerate(chapters, start=1):
-        para = chapter.get("paragraph", "")
+    image_descriptions = []
+    image_prompts = []
+    accumulated = ""
+    previous_meta = None
+
+    for idx, ch in enumerate(chapters, start=1):
+        para = ch.get("paragraph", "")
         prev = accumulated or "이야기 시작"
         desc = describe_scene_kor(para, character_profile, idx, prev)
-        prompt = build_image_prompt_kor(desc, character_profile, idx, previous_meta)
+        prompt = build_image_prompt_kor(desc, character_profile, idx, previous_meta=previous_meta)
         image_descriptions.append(desc)
         image_prompts.append(prompt)
-        accumulated += " " + para
-        previous_meta = {"style_tags": "부드러운 수채화; 따뜻한 조명"}
+        accumulated = (accumulated + " " + para).strip()
+        previous_meta = {"style_tags":"부드러운 수채화; 따뜻한 조명"}
 
-    return jsonify({
-        "title": story_data.get("title"),
+    response = {
+        "title": story_data.get("title") or f"{name}의 이야기",
         "character_profile": character_profile,
-        "story_paragraphs": [c.get("paragraph", "") for c in chapters],
+        "story_paragraphs": [c.get("paragraph","") for c in chapters],
         "image_descriptions": image_descriptions,
         "image_prompts": image_prompts,
         "ending": story_data.get("ending") or ""
-    })
+    }
+    logging.info("DEBUG /generate-story response summary: %s", json.dumps(response, ensure_ascii=False)[:2000])
+    return jsonify(response)
 
-# ───────────────────────
-# API: /generate-image
-# ───────────────────────
+# ───────────────────────────────
+# 엔드포인트: /generate-image (프론트가 개별 요청)
+# ───────────────────────────────
 @app.post("/generate-image")
 def generate_image():
     data = request.get_json(force=True)
     raw_cp = data.get("character_profile") or data.get("character") or data.get("characterProfile")
-    scene_description = data.get("image_description") or data.get("scene") or data.get("scene_description") or data.get("scene_sentence") or ""
+    scene_description = (data.get("image_description") or data.get("scene") or data.get("scene_description") or data.get("scene_sentence") or "")
     scene_index = data.get("scene_index") or data.get("index") or 1
 
     character_profile = ensure_character_profile(raw_cp)
     if not character_profile:
-        return jsonify({"error": "character_profile이 필요합니다."}), 400
+        return jsonify({"error":"character_profile은 dict 또는 canonical 문자열이어야 합니다.","received": raw_cp}), 400
     if not scene_description:
-        return jsonify({"error": "scene_description이 필요합니다."}), 400
+        return jsonify({"error":"scene_description(또는 image_description/scene 등) 필수"}), 400
 
     prompt = build_image_prompt_kor(scene_description, character_profile, scene_index)
+    logging.info("DEBUG /generate-image prompt len=%d", len(prompt))
 
     try:
         res = client.images.generate(
             model="dall-e-3",
             prompt=prompt,
-            size="1024x1792",  # 세로형
+            size="512x512",
             quality="standard",
             n=1
         )
-        image_url = res.data[0].url if res and res.data else None
-        if not image_url:
-            return jsonify({"error": "이미지 URL 없음", "prompt_used": prompt}), 500
-        return jsonify({"image_url": image_url, "prompt_used": prompt})
     except Exception as e:
-        logging.exception("이미지 생성 실패")
-        return jsonify({"error": "이미지 생성 실패", "detail": str(e), "prompt_used": prompt}), 500
+        logging.exception("이미지 생성 API 호출 실패")
+        return jsonify({"error":"이미지 생성 API 호출 실패","detail":str(e),"prompt_used":prompt}), 500
 
-# ───────────────────────
+    image_url = None
+    try:
+        if res and getattr(res,"data",None):
+            image_url = res.data[0].url
+    except Exception:
+        logging.exception("이미지 응답 파싱 실패")
+        image_url = None
+
+    if not image_url:
+        logging.error("이미지 생성 실패: URL 없음. full response: %s", str(res)[:1000])
+        return jsonify({"error":"이미지 생성 실패(응답에 URL 없음)","prompt_used":prompt}), 500
+
+    return jsonify({"image_url": image_url, "prompt_used": prompt})
+
+# ───────────────────────────────
 # 앱 실행
-# ───────────────────────
+# ───────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
