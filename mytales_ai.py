@@ -26,8 +26,6 @@ def clean_text(s):
 
 def count_self_choice_indicators(text):
     indicators = ["한 번", "한입", "한 입", "냄새", "손끝", "손가락", "스스로", "직접", "시도", "골라", "골라보다", "조심스레", "조심히", "다시 한 번", "다시 한입"]
-    if not text:
-        return 0
     return sum(text.count(ind) for ind in indicators)
 
 def ensure_character_profile(obj):
@@ -41,7 +39,7 @@ def ensure_character_profile(obj):
             parsed = json.loads(s)
             if isinstance(parsed, dict):
                 return parsed
-        except Exception:
+        except:
             pass
         m = re.search(r'Canonical\s*Visual\s*Descriptor\s*[:\-]?\s*(.+)', s, re.IGNORECASE)
         canonical = m.group(1).strip() if m else s
@@ -84,27 +82,23 @@ def generate_character_profile(name, age, gender):
     }
 
 # ─────────────────────────────
-# 동화 텍스트 생성 (프롬프트만 교체)
+# 동화 텍스트 생성
 # ─────────────────────────────
 def generate_story_text(name, age, gender, topic, max_attempts=2):
-    prompt = """
-당신은 5~9세 어린이를 위한 따뜻하고 리드미컬한 동화 작가입니다. 출력은 엄격한 JSON만 허용합니다:
-{"title":"", "character":"", "chapters":[{"title":"", "paragraph":"", "illustration":""}, ...], "ending":""}
+    prompt = f"""
+당신은 5~9세 어린이를 위한 따뜻하고 리드미컬한 동화 작가입니다.
+출력은 JSON 형식만 반환하세요:
+{{"title":"", "character":"", "chapters":[{{"title":"", "paragraph":"", "illustration":""}}, ...], "ending":""}}
 
 요구사항:
-1. 입력값을 반영: 이름, 나이, 성별, 훈육주제(예: 편식).
-2. 스토리 아크 필수: 발단(문제 인식) → 전개(시도와 실패) → 절정(중대한 선택/위기) → 결말(행동 변화와 결과).
-3. 챕터 구성: 총 5장(각 2~4문장). 각 챕터 끝에 삽화 설명 1문장(시각 정보만, 말풍선·텍스트 금지).
-4. 등장인물: 의인화된 훈육 화신(예: 당근 요정) + 조력자 필수.
-5. 동기 부여: 행동의 '이유'를 명확히 제공(외적 동기와 간단한 원리 또는 상징적 근거).
-6. 시도와 학습: 주인공이 스스로 시도하는 장면을 최소 2회 포함; 각 시도는 실패 또는 학습을 포함.
-7. 작은 규칙: 각 챕터에 작은 실행 규칙 1개 포함(예: "한 모금만 천천히").
-8. 교훈은 직접 서술 금지; 행동과 결과, 감정 변화로 암시.
-9. 감각 묘사(시각·후각·촉각) 포함.
-10. 언어: 한국어. 스타일: 따뜻하고 간결.
-11. 출력 예시 형식에 정확히 맞춰 JSON만 반환.
+1. 입력값 반영: 이름={name}, 나이={age}, 성별={gender}, 훈육주제={topic}
+2. 구성: 발단 → 전개 → 절정 → 결말 (총 5챕터, 각 챕터 2~4문장)
+3. 등장: 의인화된 훈육 화신 + 조력자
+4. 장면마다 감정/감각 묘사, 작은 규칙 포함
+5. 교훈은 직접 말하지 말고 행동과 결과로 암시
+6. 챕터마다 1문장짜리 시각적 삽화 설명 추가 (텍스트 금지)
 
-추가: 챕터4는 절정(중대한 선택)으로 배치하고, 챕터 내 문장 말미에 캐릭터 외형을 한 번 "캐릭터: Canonical Visual Descriptor: ..." 형태로 포함해 이미지 연속성에 도움을 주세요.
+반드시 JSON만 반환하세요.
 """.strip()
 
     for _ in range(max_attempts):
@@ -112,53 +106,46 @@ def generate_story_text(name, age, gender, topic, max_attempts=2):
             res = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are '훈육 동화봇' writing warm Korean discipline stories in JSON."},
+                    {"role": "system", "content": "You are a Korean children's story writer. Respond only in valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.6,
                 max_tokens=1200,
             )
-            raw = res.choices[0].message.content.strip() if getattr(res.choices[0].message, 'content', None) else str(res)
+            raw = res.choices[0].message.content.strip()
             cleaned = re.sub(r'```(?:json)?', '', raw).strip()
             try:
                 data = json.loads(cleaned)
-            except Exception:
-                # 시도적으로 본문 끝의 JSON 객체 추출
-                m = re.search(r'(\{[\s\S]*\})\s*$', cleaned)
-                if m:
-                    try:
-                        data = json.loads(m.group(1))
-                    except Exception:
-                        data = None
-                else:
-                    data = None
+            except:
+                match = re.search(r'(\{[\s\S]*\})\s*$', cleaned)
+                data = json.loads(match.group(1)) if match else None
 
             if isinstance(data, dict) and isinstance(data.get("chapters"), list) and len(data["chapters"]) >= 5:
-                full_text = " ".join([c.get("paragraph","") for c in data["chapters"]])
+                full_text = " ".join([c.get("paragraph", "") for c in data["chapters"]])
                 if count_self_choice_indicators(full_text) >= 2:
                     return data
-        except Exception as e:
+        except Exception:
             logging.exception("generate_story_text 실패")
             time.sleep(0.5)
 
-    # Fallback (기본 구조)
+    # fallback
     title = f"{name}의 작은 모험"
     chapters = [
-        {"title": "1. 시작", "paragraph": f"{name}은(는) 새로운 접시에 낯설어했어요.", "illustration": "따뜻한 부엌 창가 장면"},
-        {"title": "2. 소리", "paragraph": "딸깍 소리와 함께 음식 친구들이 말을 걸었어요.", "illustration": "말하는 당근과 작은 조명"},
-        {"title": "3. 조심스러운 접근", "paragraph": f"{name}은(는) 손끝으로 살짝 만져보았어요.", "illustration": "호기심 어린 손끝 클로즈업"},
-        {"title": "4. 조력자의 등장", "paragraph": "호박 요정이 게임을 제안했어요.", "illustration": "작은 호박 요정이 반짝이는 장면"},
-        {"title": "5. 귀환", "paragraph": "집으로 돌아와 다시 한입 시도했어요.", "illustration": "창가에서 미소짓는 장면"}
+        {"title": "1. 시작", "paragraph": f"{name}은(는) 새로운 접시에 낯설어했어요.", "illustration": "밝은 부엌에서 접시를 바라보는 아이"},
+        {"title": "2. 친구 등장", "paragraph": "말하는 당근이 수줍게 인사했어요.", "illustration": "웃는 당근 친구와 아이"},
+        {"title": "3. 첫 시도", "paragraph": "수지는 손끝으로 살짝 만져보았어요.", "illustration": "포크를 조심스레 드는 손"},
+        {"title": "4. 조력자의 제안", "paragraph": "호박 요정이 작은 게임을 제안했어요.", "illustration": "호박 요정이 손짓하는 모습"},
+        {"title": "5. 돌아온 선택", "paragraph": "집으로 돌아온 수지는 다시 한입 시도했어요.", "illustration": "창가에서 포크를 든 아이"}
     ]
     return {
         "title": title,
         "character": f"{name} ({age} {gender})",
         "chapters": chapters,
-        "ending": "아이의 입가에 작은 미소가 피어났어요."
+        "ending": "입가에 작은 미소가 번졌어요."
     }
 
 # ─────────────────────────────
-# 장면 묘사 + 이미지 프롬프트 생성 (프롬프트 템플릿 교체)
+# 장면 묘사 및 이미지 프롬프트
 # ─────────────────────────────
 def describe_scene_kor(scene_text, character_profile, scene_index, previous_summary):
     try:
@@ -166,56 +153,34 @@ def describe_scene_kor(scene_text, character_profile, scene_index, previous_summ
 이전 내용: {previous_summary}
 현재 장면: {scene_text}
 캐릭터 외형: {character_profile.get('visual', {}).get('canonical')}
-→ 감정/배경/조명/행동을 포함한 묘사, 한 문장으로. 텍스트/말풍선 없이.
-""".strip()
+
+한 문장으로 감정, 행동, 배경, 조명을 포함한 시각 묘사만 작성하세요.
+텍스트/말풍선 금지.
+"""
         res = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "Write Korean visual descriptions for children's picture books."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "Write visual descriptions for Korean children's picture books."},
+                {"role": "user", "content": prompt.strip()}
             ],
             temperature=0.25,
             max_tokens=180,
         )
         return clean_text(res.choices[0].message.content)
-    except Exception:
+    except:
         logging.exception("묘사 실패")
-        return clean_text(((scene_text or "")[:120]) + " ... 따뜻한 조명, 수채화 느낌.")
+        return f"{scene_text[:100]} ... 따뜻한 조명, 수채화 느낌."
 
 def build_image_prompt_kor(scene_sentence, character_profile, scene_index, previous_meta=None):
-    # 교체된 이미지 프롬프트 템플릿 적용
-    canonical = character_profile.get('visual', {}).get('canonical') or character_profile.get('style') or ""
-    age = character_profile.get("age") or ""
-    gender = character_profile.get("gender") or ""
-    variant = character_profile.get("variant", {})
-    variant_id = variant.get("variant_id") if isinstance(variant, dict) else ""
-    seed = variant.get("seed") if isinstance(variant, dict) else ""
-    appearance_overrides = variant.get("appearance_overrides") if isinstance(variant, dict) else ""
-
-    overrides_str = ""
-    if isinstance(appearance_overrides, dict) and appearance_overrides:
-        pairs = []
-        for k, v in appearance_overrides.items():
-            pairs.append(f"{k}:{v}")
-        overrides_str = "; " + ", ".join(pairs)
-
-    meta_prev = f"이전 이미지 메타: {previous_meta}." if previous_meta else ""
-    prompt = (
-        f"{canonical} {age}세, {gender}. variant_id:{variant_id} seed:{seed}{overrides_str}\n"
-        f"장면 인덱스: {scene_index}. 장면 설명: {scene_sentence}.\n"
-        f"Constraints:\n"
-        f"- 캐릭터 외형(머리/눈/옷/비율)은 절대 변경 금지.\n"
-        f"- 일관성 유지: 모든 프롬프트에 동일한 Canonical Visual Descriptor 포함.\n"
-        f"- 스타일: 부드러운 수채화; 따뜻한 조명; 아동 친화적 톤; 밝고 순한 색감.\n"
-        f"- 구도: mid-shot 권장; 표정과 포즈는 scene_sentence에서 구체화.\n"
-        f"- 금지: 텍스트/말풍선, 과도한 리얼리즘, 과장된 성별 표현.\n"
-        f"Render hints: color_palette: pastel greens & warm yellows; camera: mid-shot, eye-level.\n"
-        f"{meta_prev}"
+    canonical = character_profile.get('visual', {}).get('canonical') or ""
+    style = "부드러운 수채화 스타일; 따뜻한 조명; 아동 친화적 톤; 밝고 순한 색감"
+    return (
+        f"{canonical}. 장면 {scene_index}: {scene_sentence}. "
+        f"{style}. 캐릭터 외형(머리/눈/옷/비율) 절대 변경 금지. 텍스트/말풍선 없음."
     )
-    return prompt.strip()
 
 # ─────────────────────────────
-# 엔드포인트: /generate-story
+# /generate-story
 # ─────────────────────────────
 @app.post("/generate-story")
 def generate_story():
@@ -232,89 +197,61 @@ def generate_story():
     story_data = generate_story_text(name, age, gender, topic)
 
     chapters = story_data.get("chapters", [])
-    if len(chapters) < 5:
-        chapters = [
-            {"title": "1. 시작", "paragraph": f"{name}은(는) 새로운 접시에 낯설어했어요.", "illustration": ""},
-            {"title": "2. 소리", "paragraph": "딸깍 소리와 함께 음식 친구들이 말을 걸었어요.", "illustration": ""},
-            {"title": "3. 조심스러운 접근", "paragraph": f"{name}은(는) 손끝으로 살짝 만져보았어요.", "illustration": ""},
-            {"title": "4. 조력자의 등장", "paragraph": "호박 요정이 게임을 제안했어요.", "illustration": ""},
-            {"title": "5. 귀환", "paragraph": "집으로 돌아와 다시 한입 시도했어요.", "illustration": ""}
-        ]
-
-    image_descriptions = []
-    image_prompts = []
+    image_descriptions, image_prompts = [], []
     accumulated = ""
-    previous_meta = None
 
     for idx, ch in enumerate(chapters, start=1):
         para = ch.get("paragraph", "")
         prev = accumulated or "이야기 시작"
         desc = describe_scene_kor(para, character_profile, idx, prev)
-        prompt = build_image_prompt_kor(desc, character_profile, idx, previous_meta)
+        prompt = build_image_prompt_kor(desc, character_profile, idx)
         image_descriptions.append(desc)
         image_prompts.append(prompt)
         accumulated += " " + para
-        previous_meta = {"style_tags": "부드러운 수채화; 따뜻한 조명"}
 
-    response = {
-        "title": story_data.get("title") or f"{name}의 이야기",
+    return jsonify({
+        "title": story_data.get("title"),
         "character_profile": character_profile,
         "story_paragraphs": [c.get("paragraph", "") for c in chapters],
         "image_descriptions": image_descriptions,
         "image_prompts": image_prompts,
-        "ending": story_data.get("ending") or ""
-    }
-    logging.info("DEBUG /generate-story response summary: %s", json.dumps(response, ensure_ascii=False)[:2000])
-    return jsonify(response)
+        "ending": story_data.get("ending", "")
+    })
 
 # ─────────────────────────────
-# 엔드포인트: /generate-image
+# /generate-image
 # ─────────────────────────────
 @app.post("/generate-image")
 def generate_image():
     data = request.get_json(force=True)
-    raw_cp = data.get("character_profile") or data.get("character") or data.get("characterProfile")
-    scene_description = (data.get("image_description") or data.get("scene") or data.get("scene_description") or data.get("scene_sentence") or "")
-    scene_index = data.get("scene_index") or data.get("index") or 1
-    requested_size = data.get("size")
+    character_profile = ensure_character_profile(data.get("character_profile"))
+    scene_description = data.get("image_description") or ""
+    scene_index = data.get("scene_index") or 1
 
-    character_profile = ensure_character_profile(raw_cp)
-    if not character_profile:
-        return jsonify({"error":"character_profile은 dict 또는 canonical 문자열이어야 합니다.","received": raw_cp}), 400
-    if not scene_description:
-        return jsonify({"error":"scene_description(또는 image_description/scene 등) 필수"}), 400
+    if not character_profile or not scene_description:
+        return jsonify({"error": "character_profile 및 scene_description 필요"}), 400
 
     prompt = build_image_prompt_kor(scene_description, character_profile, scene_index)
-    logging.info("DEBUG /generate-image prompt len=%d", len(prompt))
+    logging.info(f"[프롬프트] 이미지 {scene_index} 생성 중: {prompt[:120]}...")
 
     try:
         res = client.images.generate(
             model="dall-e-3",
             prompt=prompt,
-            size="1024x1792",
+            size="1024x1024",  # ✅ 정사각형 비율로 수정
             quality="standard",
             n=1
         )
+        url = res.data[0].url if res and res.data else None
+        if not url:
+            raise ValueError("이미지 응답에 URL 없음")
+        return jsonify({"image_url": url, "prompt_used": prompt})
     except Exception as e:
-        logging.exception("이미지 생성 API 호출 실패")
-        return jsonify({"error":"이미지 생성 API 호출 실패","detail": str(e), "prompt_used": prompt}), 500
-
-    image_url = None
-    try:
-        if res and getattr(res,"data",None):
-            image_url = res.data[0].url
-    except Exception:
-        logging.exception("이미지 응답 파싱 실패")
-        image_url = None
-
-    if not image_url:
-        logging.error("이미지 생성 응답에 URL 없음. full response: %s", str(res)[:2000])
-        return jsonify({"error":"이미지 생성 실패(응답에 URL 없음)","prompt_used":prompt,"raw_response": str(res)[:2000]}), 500
-
-    return jsonify({"image_url": image_url, "prompt_used": prompt})
+        logging.exception("이미지 생성 실패")
+        return jsonify({"error": "이미지 생성 실패", "detail": str(e)}), 500
 
 # ─────────────────────────────
-# 로컬 실행
+# 앱 실행
 # ─────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
