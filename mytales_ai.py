@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-import os, re, json, random, time, logging, base64, requests
+import os, re, json, random, time, logging, requests
 from io import BytesIO
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -52,7 +52,7 @@ def generate_character_profile(name, age, gender):
     }
 
 # ─────────────────────────────
-# 동화 텍스트 생성 (기승전결 + 시도/보상 구조)
+# 동화 텍스트 생성
 # ─────────────────────────────
 def generate_story_text(name, age, gender, topic):
     prompt = f"""
@@ -97,7 +97,6 @@ def generate_story_text(name, age, gender, topic):
     except Exception:
         logging.exception("generate_story_text 실패")
 
-    # fallback
     return {
         "title": f"{name}의 작은 모험",
         "character": f"{name} ({age} {gender})",
@@ -195,7 +194,7 @@ def generate_full():
     })
 
 # ─────────────────────────────
-# /health
+# /health 체크
 # ─────────────────────────────
 @app.get("/health")
 def health():
