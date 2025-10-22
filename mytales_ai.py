@@ -2,194 +2,164 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-import os, re, json, random, time, logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import os, random, re, logging, json, time
 
-# ─────────────────────────────
-# 환경 변수 및 초기 설정
-# ─────────────────────────────
+# ─────────────────────────────────────
+# 환경 변수 및 기본 세팅
+# ─────────────────────────────────────
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
     raise RuntimeError("OPENAI_API_KEY not found")
 
 client = OpenAI(api_key=API_KEY)
+
 app = Flask(__name__)
+CORS(app, supports_credentials=True)
 
-# ✅ CORS 허용 설정 (Wix 미리보기 포함)
-CORS(app, resources={r"/*": {"origins": [
-    "https://*.wixsite.com",
-    "https://*.wix-code.com",
-    "https://editor.wix.com"
-]}}, supports_credentials=True)
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    response.headers['Access-Control-Allow-Methods'] = 'POST, GET, OPTIONS'
+    return response
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
-# ─────────────────────────────
-# OPTIONS 사전 요청 응답 (CORS Preflight 대응)
-# ─────────────────────────────
-@app.before_request
-def handle_options():
-    if request.method == 'OPTIONS':
-        return '', 200
-
-# ─────────────────────────────
-# 유틸
-# ─────────────────────────────
-def clean_json(s: str):
-    s = re.sub(r"```(?:json)?", "", s)
-    try:
-        return json.loads(s.strip())
-    except:
-        m = re.search(r"(\{[\s\S]*\})", s)
-        if m:
-            try:
-                return json.loads(m.group(1))
-            except:
-                return None
-    return None
-
-# ─────────────────────────────
-# 캐릭터 설정 생성
-# ─────────────────────────────
+# ─────────────────────────────────────
+# 캐릭터 외형 생성
+# ─────────────────────────────────────
 def generate_character_profile(name, age, gender):
     hair = random.choice(["짧은 갈색 곱슬머리", "긴 검은 생머리", "웨이브 밤색 머리"])
     outfit = random.choice(["노란 셔츠와 파란 멜빵", "빨간 물방울무늬 원피스", "초록 후드와 베이지 팬츠"])
-    canonical = f"{hair}; {outfit}; round face with soft cheeks; warm brown almond eyes; gentle smile; childlike proportions; gender:{gender}; age:{age}."
+    canonical = f"Canonical Visual Descriptor: {hair}; {outfit}; round face with soft cheeks; warm brown almond eyes; childlike proportions."
     return {
         "name": name,
         "age": age,
         "gender": gender,
-        "style": f"{hair}, {outfit}",
+        "style": f"{hair}, 착용: {outfit}",
         "visual": {
             "canonical": canonical,
             "hair": hair,
-            "outfit": outfit
+            "outfit": outfit,
+            "face": "부드러운 볼의 둥근 얼굴",
+            "eyes": "따뜻한 갈색 아몬드형 눈",
+            "proportions": "아이 같은 비율"
         }
     }
 
-# ─────────────────────────────
-# 동화 생성
-# ─────────────────────────────
-def generate_story_text(name, age, gender, topic):
+# ─────────────────────────────────────
+# 동화 텍스트 생성
+# ─────────────────────────────────────
+def generate_story(name, age, gender, topic):
     prompt = f"""
-당신은 5~9세 아이를 위한 한국어 훈육 동화 작가입니다.
-입력: 이름={name}, 나이={age}, 성별={gender}, 주제={topic}
+당신은 5~9세 아이를 위한 훈육 동화를 쓰는 작가입니다.
+다음 조건을 반드시 지켜 동화를 JSON 형식으로 출력하세요.
 
-아래 JSON 형식으로만 출력하세요:
+1. 이름: {name}, 나이: {age}, 성별: {gender}, 훈육 주제: {topic}
+2. 총 5개의 챕터로 구성 (도입, 갈등, 도움, 해결, 마무리)
+3. 각 챕터는 2~4문장으로, 리듬감 있고 반복적이며 아이 눈높이에 맞게
+4. 각 챕터에는 1문장짜리 삽화 설명 포함 (텍스트/말풍선 금지)
+5. 감정, 행동, 배경이 함께 어우러진 따뜻한 이야기
+6. 마무리는 명확한 교훈 없이 긍정적인 정서로 마침
+7. 반드시 아래 형식으로 JSON으로만 출력:
+
 {{
- "title": "",
- "character": "",
- "chapters": [
-   {{
-     "title": "",
-     "paragraphs": ["", ""],
-     "artist_description": ""
-   }}
- ],
- "ending": ""
+  "title": "",
+  "character": "",
+  "chapters": [
+    {{
+      "title": "",
+      "paragraph": "",
+      "illustration": ""
+    }}
+  ],
+  "ending": ""
 }}
+""".strip()
 
-규칙:
-1. 발단-전개-절정-결말 구조
-2. 직접적 훈계 없이 감정과 상황을 통해 학습 유도
-3. artist_description 포함 (배경, 감정, 구도)
-4. JSON 이외 출력 금지
-"""
     try:
         res = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a Korean children's story writer who outputs JSON only."},
+                {"role": "system", "content": "You are a Korean children's story writer. Respond only in JSON."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.6,
-            max_tokens=1400
+            max_tokens=1500
         )
-        data = clean_json(res.choices[0].message.content)
-        if data:
-            return data
-    except:
-        logging.exception("동화 생성 실패")
-    return {}
+        raw = res.choices[0].message.content.strip()
+        cleaned = re.sub(r'```(?:json)?', '', raw).strip()
+        data = json.loads(cleaned)
+        return data
+    except Exception as e:
+        logging.exception("Story generation failed")
+        return None
 
-# ─────────────────────────────
-# 이미지 프롬프트 구성 및 생성
-# ─────────────────────────────
-def build_image_prompt(character, artist_description):
-    return f"{character['visual']['canonical']} {artist_description}. soft watercolor, pastel, warm lighting, no text, picture book illustration."
+# ─────────────────────────────────────
+# 이미지 프롬프트 생성
+# ─────────────────────────────────────
+def build_image_prompt(description, character, index):
+    style = "따뜻한 조명, 수채화 스타일, 밝고 순한 색감, 아동 친화적, 텍스트 없음"
+    base = character.get("visual", {}).get("canonical", "")
+    return f"장면 {index}: {description}. {base}. {style}"
 
-def generate_image_from_prompt(prompt):
+# ─────────────────────────────────────
+# 이미지 생성
+# ─────────────────────────────────────
+def generate_image_url(prompt):
     try:
         res = client.images.generate(
             model="dall-e-3",
             prompt=prompt,
-            size="1024x1792",
-            n=1,
-            quality="standard"
+            size="1024x1024",
+            quality="standard",
+            n=1
         )
-        if res.data and res.data[0].url:
-            return res.data[0].url
-    except:
-        logging.exception("이미지 생성 실패")
-    return None
+        return res.data[0].url
+    except Exception:
+        logging.exception("Image generation failed")
+        return None
 
-# ─────────────────────────────
-# /generate-full
-# ─────────────────────────────
+# ─────────────────────────────────────
+# 최종 API: 텍스트 + 이미지 병합 생성
+# ─────────────────────────────────────
 @app.post("/generate-full")
 def generate_full():
-    start = time.time()
     data = request.get_json(force=True)
     name = data.get("name", "").strip()
     age = data.get("age", "").strip()
     gender = data.get("gender", "").strip()
     topic = data.get("topic", "").strip()
+    generate_images = data.get("generate_images", True)
 
     if not all([name, age, gender, topic]):
-        return jsonify({"error": "name, age, gender, topic required"}), 400
+        return jsonify({"error": "입력 값이 부족합니다."}), 400
 
     character = generate_character_profile(name, age, gender)
-    story = generate_story_text(name, age, gender, topic)
+    story = generate_story(name, age, gender, topic)
+
+    if not story:
+        return jsonify({"error": "동화 생성 실패"}), 500
+
+    # 이미지 생성
     chapters = story.get("chapters", [])
+    images = []
+    if generate_images:
+        for idx, ch in enumerate(chapters, start=1):
+            desc = ch.get("illustration", "")
+            prompt = build_image_prompt(desc, character, idx)
+            url = generate_image_url(prompt)
+            ch["image"] = url if url else None
+            time.sleep(1.5)  # DALL-E 호출 간 딜레이
 
-    def generate_scene(chapter):
-        desc = chapter.get("artist_description") or " ".join(chapter.get("paragraphs", []))
-        prompt = build_image_prompt(character, desc)
-        return generate_image_from_prompt(prompt)
-
-    images = [None] * len(chapters)
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(generate_scene, ch): i for i, ch in enumerate(chapters)}
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                images[idx] = future.result()
-            except:
-                images[idx] = None
-
-    for i, ch in enumerate(chapters):
-        ch["image"] = images[i] or None
-
-    result = {
+    return jsonify({
         "title": story.get("title", ""),
-        "character_profile": character,
+        "character": character,
         "chapters": chapters,
-        "ending": story.get("ending", ""),
-        "time_taken": round(time.time() - start, 2)
-    }
-    return jsonify(result)
+        "ending": story.get("ending", "")
+    })
 
-# ─────────────────────────────
-# 상태 확인
-# ─────────────────────────────
-@app.get("/health")
-def health():
-    return jsonify({"status": "ok", "time": time.time()})
-
-# ─────────────────────────────
+# ─────────────────────────────────────
 # 실행
-# ─────────────────────────────
+# ─────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
