@@ -4,7 +4,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import os, json, re, random, logging, time, base64, requests
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ExifTags
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─────────────────────────────
@@ -18,7 +18,6 @@ if not API_KEY:
 client = OpenAI(api_key=API_KEY)
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
-
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
 
 # ─────────────────────────────
@@ -42,10 +41,6 @@ def safe_json_loads(s):
     return None
 
 def ensure_character_profile(obj):
-    """
-    Accept dict or JSON string or canonical string.
-    Return dict with visual.canonical, gender, age present where possible.
-    """
     if not obj:
         return None
     if isinstance(obj, dict):
@@ -54,7 +49,6 @@ def ensure_character_profile(obj):
         if not visual.get("canonical"):
             visual["canonical"] = canonical
             obj["visual"] = visual
-        # normalize gender/age keys
         if "gender" not in obj and visual.get("gender"):
             obj["gender"] = visual.get("gender")
         if "age" not in obj and visual.get("age"):
@@ -104,33 +98,35 @@ def generate_character_profile(name, age, gender):
     }
 
 # ─────────────────────────────
-# 동화 생성 (훈육 규칙 강제 포함)
+# 동화 생성 (기승전결 + 판타지적 보상 규칙 강화)
 # ─────────────────────────────
 def generate_story_text(name, age, gender, topic):
-    logging.info("🧠 동화 생성 시작 (훈육 규칙 포함 프롬프트)")
+    logging.info("동화 생성 시작 (강화 프롬프트)")
     prompt = f"""
-당신은 5~9세 아동을 위한 따뜻한 훈육 동화 작가입니다. 문장은 짧고 리드미컬합니다.
+당신은 5~9세 아동을 위한 따뜻한 훈육 동화 작가이며 일러스트레이터 관점에서 artist_description도 생성합니다.
+문체: 친근, 짧고 리드미컬. 무섭지 않음.
+
 입력: 이름={name}, 나이={age}, 성별={gender}, 주제={topic}
 
-출력은 오직 JSON만 반환:
+출력(엄격, JSON만):
 {{"title":"", "table_of_contents":["","",...], "character":"이름 (나이 성별)",
- "chapters":[{{"title":"", "paragraphs":["문장1","문장2"], "illustration":"(원문 문장 그대로)", "artist_description":"(일러스트레이터용 풍부한 장면 묘사)"}}, ... 5개], "ending":""}}
+ "chapters":[{{"title":"", "paragraphs":["문장1","문장2"], "illustration":"(원문 문장 그대로)", "artist_description":"(일러스트용 풍부한 묘사)"}} ... 5개], "ending":""}}
 
-요구사항(엄격):
-1) 총 5장(각 챕터 paragraphs 배열 2~3문장).
-2) 스토리 아크: 발단→전개(최소 두 번의 시도 포함, 실패/학습 묘사)→절정(챕터4)→결말.
-3) 등장: 주인공 + 의인화된 조력자(조력자는 반드시 '작은 규칙'을 하나 제시).
-4) 훈육주제가 '편식'인 경우: 반드시 '작은 규칙'을 제시하라(예: '한 입만 천천히'). 주인공은 이 규칙을 최소 두 번 시도하고, 첫 시도에서 실패하거나 불편함을 겪고, 이후 점진적 개선을 통해 챕터4에서 스스로 규칙을 선택해 행동으로 옮겨야 한다.
-5) 교훈은 직접적으로 "해야 한다" 식으로 말하지 말고 행동과 결과로 암시하라(칭찬, 자랑스러움, 부모의 포옹 등).
-6) 각 챕터의 illustration 필드는 동화의 원문 문장 그대로 포함해야 한다.
-7) 각 챕터의 artist_description은 일러스트레이터가 즉시 그릴 수 있도록 캐릭터 외형, 행동, 배경, 조명, 구도, 스타일 힌트를 포함해야 한다.
-8) 출력 외 텍스트, 코드블록, 주석을 금지.
+요구사항:
+1) 기승전결(발단→전개(최소 2회 시도 포함)→절정(챕터4)→결말)을 반드시 지켜라.
+2) 조력자(요정/장난감/동물 등)를 등장시켜 '작은 규칙' 또는 '재미있는 이유/마법적 보상'을 하나 제시하라.
+3) 훈육 주제가 '편식'일 경우: 반드시 '작은 규칙' 제시(예: '한 입만 천천히') 및 주인공이 최소 두 번 시도(첫 시도 실패 포함), 챕터4에서 스스로 규칙을 선택해 행동으로 옮겨야 한다.
+4) 결말은 직접적 지시 없이 행동과 결과(칭찬, 자신감, 마법적 암시 등)로 교훈을 암시하라.
+5) 각 챕터의 illustration 필드에는 동화 원문 문장 그대로 포함.
+6) 각 챕터의 artist_description은 캐릭터 외형, 필수 시각요소(Include clause), 배경, 조명, 구도, 스타일 힌트 포함.
+7) 사용자의 입력이 불충분하면 자동으로 안전하고 창의적인 마법적 보상을 제시하라.
+8) 출력 외 추가 텍스트 금지.
 """
     try:
         res = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a warm Korean children's story writer. Output only JSON."},
+                {"role": "system", "content": "Write warm Korean children's stories for ages 5-9 and produce illustrator-friendly descriptions. Output only JSON."},
                 {"role": "user", "content": prompt.strip()}
             ],
             temperature=0.6,
@@ -140,7 +136,6 @@ def generate_story_text(name, age, gender, topic):
         raw = res.choices[0].message.content.strip()
         data = safe_json_loads(re.sub(r"```(?:json)?", "", raw))
         if data and isinstance(data.get("chapters"), list) and len(data["chapters"]) == 5:
-            # normalize
             for ch in data["chapters"]:
                 if "paragraphs" not in ch:
                     para = ch.get("paragraph") or ""
@@ -150,26 +145,84 @@ def generate_story_text(name, age, gender, topic):
                 if "artist_description" not in ch or not ch.get("artist_description"):
                     joined = " ".join(ch["paragraphs"])
                     ch["artist_description"] = make_artist_description_from_paragraph(joined, {"visual": {"canonical": f"Canonical Visual Descriptor: gender: {gender}; age: {age}."}})
+            # validation: ensure arc and magical hint
+            if not validate_story_structure(data):
+                logging.info("생성된 이야기 구조 검증 실패, 재생성 시도")
+                # one retry with stricter instruction
+                return regenerate_story_with_strict_arc(name, age, gender, topic)
             return data
     except Exception:
         logging.exception("동화 생성 실패")
-    # fallback
+    return regenerate_story_with_strict_arc(name, age, gender, topic, fallback=True)
+
+def regenerate_story_with_strict_arc(name, age, gender, topic, fallback=False):
+    prompt_extra = "Regenerate with a strict 5-chapter arc and include clear magical reward or small rule; ensure chapter4 is climax containing the character's conscious choice."
+    prompt = f"{prompt_extra}\nInput: name={name}, age={age}, gender={gender}, topic={topic}"
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role":"system","content":"Write warm Korean children's stories for ages 5-9. Output only JSON."},
+                      {"role":"user","content":prompt}],
+            temperature=0.6,
+            max_tokens=1400,
+            timeout=60
+        )
+        raw = res.choices[0].message.content.strip()
+        data = safe_json_loads(re.sub(r"```(?:json)?", "", raw))
+        if data and isinstance(data.get("chapters"), list) and len(data["chapters"]) == 5:
+            for ch in data["chapters"]:
+                if "paragraphs" not in ch:
+                    para = ch.get("paragraph") or ""
+                    ch["paragraphs"] = [para] if para else []
+                if "illustration" not in ch:
+                    ch["illustration"] = ""
+                if "artist_description" not in ch or not ch.get("artist_description"):
+                    joined = " ".join(ch["paragraphs"])
+                    ch["artist_description"] = make_artist_description_from_paragraph(joined, {"visual": {"canonical": f"Canonical Visual Descriptor: gender: {gender}; age: {age}."}})
+            if not validate_story_structure(data) and not fallback:
+                return regenerate_story_with_strict_arc(name, age, gender, topic, fallback=True)
+            return data
+    except Exception:
+        logging.exception("재생성 실패")
+    # final fallback minimal story
     return {
         "title": f"{name}의 작은 모험",
-        "table_of_contents": ["시작","발견","시도","절정","결말"],
+        "table_of_contents": ["시작","만남","시도","결심","결말"],
         "character": f"{name} ({age} {gender})",
         "chapters": [
-            {"title":"1. 시작","paragraphs":[f"{name}은 새로운 꿈을 꾸었어요.","문이 살짝 열렸어요."],"illustration":"", "artist_description":""},
-            {"title":"2. 발견","paragraphs":["신비한 마을이 나타났어요.","소리들이 리듬을 만들었어요."],"illustration":"", "artist_description":""},
-            {"title":"3. 시도","paragraphs":[f"{name}은(는) 조심스레 시도해봤어요.","처음엔 어색했어요."],"illustration":"", "artist_description":""},
-            {"title":"4. 절정","paragraphs":["큰 결심의 순간이 왔어요.","작은 약속을 했어요."],"illustration":"", "artist_description":""},
-            {"title":"5. 결말","paragraphs":["다음 날, 작은 약속을 지켰어요.","마음에 따뜻한 빛이 남았어요."],"illustration":"", "artist_description":""}
+            {"title":"1. 시작","paragraphs":[f"{name}은 채소를 싫어했어요.","오늘도 접시에 채소가 남았어요."],"illustration":"","artist_description":""},
+            {"title":"2. 만남","paragraphs":["작은 요정이 나타났어요.","요정이 작은 규칙을 알려주었어요."],"illustration":"","artist_description":""},
+            {"title":"3. 시도","paragraphs":["한 번 시도해봤지만 어려웠어요.","그래도 포기하지 않았어요."],"illustration":"","artist_description":""},
+            {"title":"4. 절정","paragraphs":["결심의 순간, 스스로 선택했어요.","작은 보상이 마음에 불을 지폈어요."],"illustration":"","artist_description":""},
+            {"title":"5. 결말","paragraphs":["습관이 조금 생겼어요.","마음이 뿌듯했어요."],"illustration":"","artist_description":""}
         ],
-        "ending":"작은 약속이 큰 변화를 만들었어요."
+        "ending":"작은 결심이 큰 변화를 만들었어요."
     }
 
+def validate_story_structure(data):
+    try:
+        chapters = data.get("chapters", [])
+        if not isinstance(chapters, list) or len(chapters) != 5:
+            return False
+        # each chapter paragraphs 2~3
+        for ch in chapters:
+            paras = ch.get("paragraphs") or []
+            if not isinstance(paras, list) or not (1 < len(paras) <= 3):
+                return False
+        # chapter4 should contain climax keywords
+        ch4_text = " ".join(chapters[3].get("paragraphs") or [])
+        if not any(k in ch4_text for k in ["결심", "선택", "결정", "마지막 용기", "용기"]):
+            return False
+        # presence of helper or rule in story
+        whole = " ".join([" ".join(c.get("paragraphs") or []) for c in chapters])
+        if not any(k in whole for k in ["요정", "규칙", "작은 규칙", "약속", "보상", "마법"]):
+            return False
+        return True
+    except Exception:
+        return False
+
 # ─────────────────────────────
-# artist_description 자동 보강
+# artist_description 생성 및 강화 (Include clause)
 # ─────────────────────────────
 def make_artist_description_from_paragraph(paragraph, character_profile, default_place=None):
     canonical = ""
@@ -184,35 +237,41 @@ def make_artist_description_from_paragraph(paragraph, character_profile, default
         p = p.strip()
         if not p:
             continue
-        if any(k in p for k in ["속삭", "다가", "도착", "만나", "춤", "노래", "도전", "시도", "결심", "제안", "만들"]):
+        if any(k in p for k in ["속삭", "다가", "도착", "만나", "춤", "노래", "도전", "시도", "결심", "제안", "만들", "먹"]):
             main = p
             break
     if not main:
         main = parts[0] if parts else s
+    keywords = ["브로콜리","당근","요정","수정","아이","식탁","접시","한 입","속삭"]
+    include = [kw for kw in keywords if kw in s]
+    if not include:
+        include = ["child", "helper", "food"]
     quote_m = re.search(r'["“”\']([^"\']{1,200})["“”\']', s)
     quote_summary = ""
     if quote_m:
         q = quote_m.group(1)
-        if any(w in q for w in ["한 입","천천히","재미있는 모양","시도"]):
+        if any(w in q for w in ["한 입","천천히","재미있는 모양","시도","먹으면"]):
             quote_summary = "따뜻하게 권하는 말투"
         else:
-            quote_summary = "부드럽게 속삭이는 분위기"
+            quote_summary = "부드럽게 권하는 분위기"
     place = default_place or ""
-    for kw in ["채소 마을","채소마을","마을","정원","주방","숲","바다","교실","초원","집"]:
+    for kw in ["채소 마을","채소마을","마을","정원","주방","식당","숲","집","교실"]:
         if kw in s:
             place = kw
             break
     lighting = "부드러운 황금빛"
-    composition = "mid-shot" if "속삭" in main or "다가" in main else "mid-shot"
+    composition = "mid-shot"
+    include_list = ", ".join(include)
+    include_clause = f"Include visible elements exactly: {include_list}."
     place_part = f"{place}에서 " if place else ""
     quote_part = f", 분위기: {quote_summary}" if quote_summary else ""
     illustration = f"{place_part}{main} 장면{quote_part}, {lighting}; 구도: {composition}."
     full = f"{canonical}. {illustration}" if canonical else illustration
-    style_hints = "밝고 부드러운 색감; 따뜻한 수채화 스타일; 귀엽고 친근한 캐릭터; 텍스트 없음; 현실적 과장 없음"
-    return f"{full} 스타일: {style_hints}"
+    style_hints = "밝고 부드러운 색감; 따뜻한 수채화 스타일; 귀엽고 친근한 캐릭터; no text; no pencil/sketch; avoid photorealism"
+    return f"{full} {include_clause} Style: {style_hints}"
 
 # ─────────────────────────────
-# 이미지 프롬프트 생성 (orientation 및 no-sketch 강제)
+# 이미지 프롬프트 빌드 (orientation, no-sketch 등 강제)
 # ─────────────────────────────
 def build_image_prompt(character_profile, artist_description, scene_index, previous_background=None, orientation="portrait"):
     cp = ensure_character_profile(character_profile)
@@ -229,19 +288,34 @@ def build_image_prompt(character_profile, artist_description, scene_index, previ
     return prompt
 
 # ─────────────────────────────
-# 이미지 생성 및 후처리: orientation 검사와 회전(필요시)
+# EXIF-aware fetch + upright conversion -> data URL
 # ─────────────────────────────
 def image_url_to_upright_dataurl(url, target_orientation="portrait", timeout=15):
-    """
-    Fetch image from url, check orientation, rotate if needed, return data URL PNG.
-    If fetching/parsing fails, return None.
-    """
     try:
         r = requests.get(url, timeout=timeout)
         r.raise_for_status()
         img = Image.open(BytesIO(r.content))
+        # EXIF orientation handling
+        try:
+            exif = img._getexif()
+            if exif:
+                orientation_key = None
+                for tag, value in ExifTags.TAGS.items():
+                    if value == 'Orientation':
+                        orientation_key = tag
+                        break
+                if orientation_key and orientation_key in exif:
+                    orient = exif.get(orientation_key)
+                    if orient == 3:
+                        img = img.rotate(180, expand=True)
+                    elif orient == 6:
+                        img = img.rotate(270, expand=True)
+                    elif orient == 8:
+                        img = img.rotate(90, expand=True)
+        except Exception:
+            pass
         w, h = img.size
-        # if we expect portrait but got landscape -> rotate 90 deg
+        # enforce portrait orientation
         if target_orientation == "portrait" and w > h:
             img = img.rotate(90, expand=True)
         elif target_orientation == "landscape" and h > w:
@@ -252,53 +326,114 @@ def image_url_to_upright_dataurl(url, target_orientation="portrait", timeout=15)
         b64 = base64.b64encode(buf.read()).decode("utf-8")
         return f"data:image/png;base64,{b64}"
     except Exception:
-        logging.exception("이미지 후처리(회전/데이터URL 생성) 실패")
+        logging.exception("이미지 후처리 실패")
         return None
 
-def generate_image_from_prompt(character_profile, artist_description, scene_index, previous_background=None):
-    prompt = build_image_prompt(character_profile, artist_description, scene_index, previous_background, orientation="portrait")
-    logging.info("이미지 프롬프트(요약): %s", (prompt[:400] + "...") if len(prompt) > 400 else prompt)
+# ─────────────────────────────
+# 이미지 검증 도우미
+# ─────────────────────────────
+def extract_missing_elements(artist_description):
+    m = re.search(r'Include visible elements exactly:\s*([^\.]+)\.', artist_description)
+    if not m:
+        return []
+    items = [it.strip() for it in m.group(1).split(",")]
+    return items
+
+def verify_image_contains_elements(dataurl, artist_description):
     try:
-        res = client.images.generate(
-            model="dall-e-3",
-            prompt=prompt,
-            size="1024x1792",  # portrait tall
-            quality="standard",
-            n=1,
-            timeout=60
-        )
-        if res and getattr(res, "data", None):
-            # get URL or b64 content depending on response shape
-            candidate = res.data[0]
-            # prefer url if present
-            url = getattr(candidate, "url", None) or candidate.get("url") if isinstance(candidate, dict) else None
-            if url:
-                # ensure upright and return data URL for reliable orientation across clients
-                dataurl = image_url_to_upright_dataurl(url, target_orientation="portrait")
-                if dataurl:
-                    return dataurl
-                # fallback to original url if dataurl failed
-                return url
-            # sometimes API returns b64 directly
-            b64 = getattr(candidate, "b64_json", None) or candidate.get("b64_json") if isinstance(candidate, dict) else None
-            if b64:
-                try:
-                    img_bytes = base64.b64decode(b64)
-                    img = Image.open(BytesIO(img_bytes))
-                    w, h = img.size
-                    if w > h:
-                        img = img.rotate(90, expand=True)
-                    buf = BytesIO()
-                    img.save(buf, format="PNG")
-                    buf.seek(0)
-                    return "data:image/png;base64," + base64.b64encode(buf.read()).decode("utf-8")
-                except Exception:
-                    logging.exception("b64 이미지 처리 실패")
-            return None
-        return None
+        header, b64 = dataurl.split(",", 1)
+        img = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
+        img_small = img.resize((100, 100))
+        pixels = list(img_small.getdata())
+        total = len(pixels)
+        greens = 0
+        sats = []
+        import colorsys
+        for r, g, b in pixels:
+            h_, s_, v_ = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
+            sats.append(s_)
+            if g > r and g > b and g > 80:
+                greens += 1
+        avg_sat = sum(sats)/len(sats) if sats else 0
+        green_ratio = greens / total if total else 0
+        # sketch detection
+        if avg_sat < 0.12:
+            return False
+        missing = extract_missing_elements(artist_description)
+        if any(m in ["브로콜리","당근","토마토"] for m in missing):
+            return green_ratio > 0.02
+        return True
     except Exception:
-        logging.exception("이미지 생성 API 호출 실패")
-        return None
+        logging.exception("이미지 검증 실패")
+        return False
+
+# ─────────────────────────────
+# 이미지 생성 with retries + verification
+# ─────────────────────────────
+def generate_image_from_prompt(character_profile, artist_description, scene_index, previous_background=None, max_retries=2):
+    cp = ensure_character_profile(character_profile)
+    target_orientation = "portrait"
+    prompt_base = build_image_prompt(cp, artist_description, scene_index, previous_background, orientation=target_orientation)
+    attempt = 0
+    last_dataurl = None
+
+    while attempt <= max_retries:
+        attempt += 1
+        logging.info("이미지 생성 시도 %s for scene %s", attempt, scene_index)
+        try:
+            res = client.images.generate(
+                model="dall-e-3",
+                prompt=prompt_base,
+                size="1024x1792",
+                quality="standard",
+                n=1,
+                timeout=60
+            )
+        except Exception:
+            logging.exception("이미지 생성 API 호출 실패")
+            res = None
+
+        url = None
+        b64 = None
+        if res and getattr(res, "data", None):
+            candidate = res.data[0]
+            url = getattr(candidate, "url", None) or (candidate.get("url") if isinstance(candidate, dict) else None)
+            b64 = getattr(candidate, "b64_json", None) or (candidate.get("b64_json") if isinstance(candidate, dict) else None)
+
+        dataurl = None
+        if url:
+            dataurl = image_url_to_upright_dataurl(url, target_orientation)
+        elif b64:
+            try:
+                img_bytes = base64.b64decode(b64)
+                img = Image.open(BytesIO(img_bytes))
+                w, h = img.size
+                if w > h:
+                    img = img.rotate(90, expand=True)
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                buf.seek(0)
+                dataurl = "data:image/png;base64," + base64.b64encode(buf.read()).decode("utf-8")
+            except Exception:
+                logging.exception("b64 처리 실패")
+
+        if not dataurl:
+            prompt_base += " Emphasize inclusion of listed elements; Avoid sketch; Output upright portrait."
+            continue
+
+        last_dataurl = dataurl
+        if verify_image_contains_elements(dataurl, artist_description):
+            return dataurl
+        else:
+            logging.warning("검증 실패: 핵심 요소 누락 가능, 재시도")
+            missing = extract_missing_elements(artist_description)
+            if missing:
+                prompt_base += " MUST include: " + ", ".join(missing) + "."
+            else:
+                prompt_base += " Emphasize scene elements and character features."
+            # loop retry
+
+    return last_dataurl
 
 # ─────────────────────────────
 # 엔드포인트: /generate-story
@@ -317,7 +452,6 @@ def generate_story():
     character = generate_character_profile(name, age, gender)
     story = generate_story_text(name, age, gender, topic)
 
-    # 보강: illustration/artist_description이 비어있으면 paragraph 기반으로 생성
     chapters = story.get("chapters", []) or []
     image_descriptions = []
     previous_bg = None
@@ -332,7 +466,7 @@ def generate_story():
         if not artist_desc:
             artist_desc = make_artist_description_from_paragraph(paragraph_text, character, previous_bg)
             ch["artist_description"] = artist_desc
-        for kw in ["채소 마을","채소마을","마을","정원","주방","숲","바다","교실","초원","집"]:
+        for kw in ["채소 마을","채소마을","마을","정원","주방","식당","숲","교실","초원","집"]:
             if kw in paragraph_text:
                 previous_bg = kw
                 break
@@ -348,7 +482,7 @@ def generate_story():
         "ending": story.get("ending", ""),
         "artist_question": "스토리의 흐름에 맞게 차례대로 그림을 그려줄까요?"
     }
-    logging.info("Generated story with artist descriptions")
+    logging.info("생성 완료: story + artist descriptions")
     return jsonify(response)
 
 # ─────────────────────────────
@@ -367,9 +501,8 @@ def generate_image():
     if not scenes or not isinstance(scenes, list):
         return jsonify({"error": "image_descriptions (array) required"}), 400
 
-    # simple background continuity detection
     def extract_bg(s):
-        for kw in ["채소 마을","채소마을","마을","정원","주방","숲","바다","교실","초원","집"]:
+        for kw in ["채소 마을","채소마을","마을","정원","주방","식당","숲","교실","초원","집"]:
             if kw in (s or ""):
                 return kw
         return None
@@ -387,10 +520,9 @@ def generate_image():
             try:
                 results[idx] = fut.result()
             except Exception:
-                logging.exception("이미지 생성 작업 실패 for index %s", idx)
+                logging.exception("이미지 생성 실패 for index %s", idx)
                 results[idx] = None
 
-    # results contain either data URLs (preferred) or image URLs or None
     return jsonify({"image_urls": results})
 
 # ─────────────────────────────
