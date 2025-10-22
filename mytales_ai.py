@@ -3,10 +3,10 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-import os, json, re, random, logging, time, base64, requests, threading
+import os, json, re, random, logging, time, base64, requests
 from io import BytesIO
 from PIL import Image, ExifTags
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 
 # ─────────────────────────────
 # 환경 및 클라이언트
@@ -22,17 +22,16 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(message)s")
 
 # ─────────────────────────────
-# 설정값 (조정 가능)
+# 설정값
 # ─────────────────────────────
-GLOBAL_TOTAL_TIMEOUT = int(os.getenv("GLOBAL_TOTAL_TIMEOUT", "120"))  # seconds for entire /generate-full
-PER_IMAGE_TIMEOUT = int(os.getenv("PER_IMAGE_TIMEOUT", "45"))        # seconds per image generation attempt
-MAX_IMAGE_RETRIES = int(os.getenv("MAX_IMAGE_RETRIES", "2"))         # retries per scene
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "3"))                     # parallel image generation
-IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1792")                    # portrait tall
-GUNICORN_BIND_PORT = int(os.getenv("PORT", "5000"))
+GLOBAL_TOTAL_TIMEOUT = int(os.getenv("GLOBAL_TOTAL_TIMEOUT", "120"))  # 전체 요청 제한 (초)
+PER_IMAGE_TIMEOUT = int(os.getenv("PER_IMAGE_TIMEOUT", "45"))         # 이미지 API 타임아웃 (초)
+MAX_IMAGE_RETRIES = int(os.getenv("MAX_IMAGE_RETRIES", "2"))          # 장면당 재시도 수
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "3"))                      # 병렬 작업 수
+IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1792")                     # portrait 크기
 
 # ─────────────────────────────
-# 유틸 함수
+# 유틸
 # ─────────────────────────────
 def safe_json_loads(s):
     if not s:
@@ -80,7 +79,7 @@ def generate_character_profile(name, age, gender):
             "visual": {"canonical": canonical, "hair": hair, "outfit": outfit, "eyes": "따뜻한 갈색 눈", "proportions": "아이 같은 비율"}}
 
 # ─────────────────────────────
-# 동화 생성 (기승전결 + 판타지적 보상 규칙)
+# 스토리 생성 (기승전결 + 판타지 보상 규칙)
 # ─────────────────────────────
 def generate_story_text(name, age, gender, topic):
     prompt = f"""
@@ -108,7 +107,6 @@ def generate_story_text(name, age, gender, topic):
         )
         raw = res.choices[0].message.content.strip()
         data = safe_json_loads(re.sub(r"```(?:json)?", "", raw))
-        # basic normalization/fallback
         if data and isinstance(data.get("chapters"), list) and len(data["chapters"]) == 5:
             for ch in data["chapters"]:
                 if "paragraphs" not in ch:
@@ -117,10 +115,37 @@ def generate_story_text(name, age, gender, topic):
                     ch["illustration"] = " ".join(ch.get("paragraphs") or [])
                 if "artist_description" not in ch:
                     ch["artist_description"] = make_artist_description_from_paragraph(" ".join(ch.get("paragraphs") or []), {"visual": {"canonical": f"Canonical Visual Descriptor: gender: {gender}; age: {age}."}})
-            return data
-    except Exception as e:
+            if validate_story_structure(data):
+                return data
+    except Exception:
         logging.exception("generate_story_text failed")
-    # fallback minimal safe story
+    return regenerate_story_with_strict_arc(name, age, gender, topic)
+
+def regenerate_story_with_strict_arc(name, age, gender, topic, fallback=False):
+    prompt_extra = "Regenerate with a strict 5-chapter arc and include clear magical reward or small rule; ensure chapter4 is climax containing the character's conscious choice."
+    prompt = f"{prompt_extra}\nInput: name={name}, age={age}, gender={gender}, topic={topic}"
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role":"system","content":"Write warm Korean children's stories for ages 5-9. Output only JSON."},
+                      {"role":"user","content":prompt}],
+            temperature=0.6, max_tokens=1400, timeout=60
+        )
+        raw = res.choices[0].message.content.strip()
+        data = safe_json_loads(re.sub(r"```(?:json)?", "", raw))
+        if data and isinstance(data.get("chapters"), list) and len(data["chapters"]) == 5:
+            for ch in data["chapters"]:
+                if "paragraphs" not in ch:
+                    ch["paragraphs"] = [ch.get("paragraph") or ""]
+                if "illustration" not in ch:
+                    ch["illustration"] = " ".join(ch.get("paragraphs") or [])
+                if "artist_description" not in ch:
+                    ch["artist_description"] = make_artist_description_from_paragraph(" ".join(ch.get("paragraphs") or []), {"visual": {"canonical": f"Canonical Visual Descriptor: gender: {gender}; age: {age}."}})
+            if validate_story_structure(data) or fallback:
+                return data
+    except Exception:
+        logging.exception("regenerate_story_with_strict_arc failed")
+    # final minimal fallback
     return {
         "title": f"{name}의 작은 모험",
         "table_of_contents": ["시작","만남","시도","절정","결말"],
@@ -135,8 +160,27 @@ def generate_story_text(name, age, gender, topic):
         "ending":"작은 결심이 큰 변화를 만들었어요."
     }
 
+def validate_story_structure(data):
+    try:
+        chapters = data.get("chapters", [])
+        if not isinstance(chapters, list) or len(chapters) != 5:
+            return False
+        for ch in chapters:
+            paras = ch.get("paragraphs") or []
+            if not isinstance(paras, list) or not (1 < len(paras) <= 3):
+                return False
+        ch4_text = " ".join(chapters[3].get("paragraphs") or [])
+        if not any(k in ch4_text for k in ["결심", "선택", "결정", "마지막 용기", "용기"]):
+            return False
+        whole = " ".join([" ".join(c.get("paragraphs") or []) for c in chapters])
+        if not any(k in whole for k in ["요정", "규칙", "작은 규칙", "약속", "보상", "마법"]):
+            return False
+        return True
+    except Exception:
+        return False
+
 # ─────────────────────────────
-# artist_description 생성 (Include clause 포함)
+# artist_description 생성
 # ─────────────────────────────
 def make_artist_description_from_paragraph(paragraph, character_profile, default_place=None):
     canonical = ""
@@ -148,8 +192,10 @@ def make_artist_description_from_paragraph(paragraph, character_profile, default
     parts = re.split(r'[。\.!?!]|[,，;；]\s*', s)
     main = ""
     for p in parts:
-        if not p: continue
-        if any(k in p for k in ["속삭", "다가", "만나", "시도", "결심", "먹"]):
+        p = p.strip()
+        if not p:
+            continue
+        if any(k in p for k in ["속삭", "다가", "도착", "만나", "춤", "노래", "도전", "시도", "결심", "제안", "만들", "먹"]):
             main = p
             break
     if not main:
@@ -162,23 +208,25 @@ def make_artist_description_from_paragraph(paragraph, character_profile, default
     quote_summary = ""
     if quote_m:
         q = quote_m.group(1)
-        if any(w in q for w in ["한 입","천천히","시도","먹으면"]):
+        if any(w in q for w in ["한 입","천천히","재미있는 모양","시도","먹으면"]):
             quote_summary = "따뜻하게 권하는 말투"
         else:
             quote_summary = "부드럽게 권하는 분위기"
     place = default_place or ""
-    for kw in ["채소 마을","마을","정원","주방","식당","숲","집","교실"]:
+    for kw in ["채소 마을","채소마을","마을","정원","주방","식당","숲","집","교실"]:
         if kw in s:
             place = kw
             break
     lighting = "부드러운 황금빛"
     composition = "mid-shot"
-    include_clause = f"Include visible elements exactly: {', '.join(include)}."
+    include_list = ", ".join(include)
+    include_clause = f"Include visible elements exactly: {include_list}."
     place_part = f"{place}에서 " if place else ""
     quote_part = f", 분위기: {quote_summary}" if quote_summary else ""
     illustration = f"{place_part}{main} 장면{quote_part}, {lighting}; 구도: {composition}."
+    full = f"{canonical}. {illustration}" if canonical else illustration
     style_hints = "밝고 부드러운 색감; 따뜻한 수채화 스타일; 귀엽고 친근한 캐릭터; no text; no pencil/sketch; avoid photorealism"
-    return f"{canonical}. {illustration} {include_clause} Style: {style_hints}"
+    return f"{full} {include_clause} Style: {style_hints}"
 
 # ─────────────────────────────
 # 이미지 프롬프트 빌드
@@ -236,7 +284,7 @@ def image_url_to_upright_dataurl(url, target_orientation="portrait", timeout=15)
         return None
 
 # ─────────────────────────────
-# 단순 검증: 색/채도/초록 픽셀 비율 및 스케치 여부
+# 단순 검증: 색/채도/초록 비율 및 스케치 여부
 # ─────────────────────────────
 def extract_missing_elements(artist_description):
     m = re.search(r'Include visible elements exactly:\s*([^\.]+)\.', artist_description)
@@ -265,7 +313,6 @@ def verify_image_contains_elements(dataurl, artist_description):
         if avg_sat < 0.12:
             return False
         missing = extract_missing_elements(artist_description)
-        # if description mentions green vegetables explicitly, require minimal green ratio
         if any(m in ["브로콜리","당근","토마토"] for m in missing):
             return green_ratio > 0.02
         return True
@@ -274,7 +321,7 @@ def verify_image_contains_elements(dataurl, artist_description):
         return False
 
 # ─────────────────────────────
-# 이미지 생성 with retries, per-image timeout, verification
+# 이미지 생성 with retries + verification
 # ─────────────────────────────
 def generate_single_image(character_profile, artist_description, previous_background=None, max_retries=MAX_IMAGE_RETRIES):
     prompt_base = build_image_prompt(character_profile, artist_description, previous_background, orientation="portrait")
@@ -282,7 +329,7 @@ def generate_single_image(character_profile, artist_description, previous_backgr
     last_dataurl = None
     while attempt <= max_retries:
         attempt += 1
-        logging.info("Image attempt %s for scene (max %s)", attempt, max_retries)
+        logging.info("Image attempt %s (max %s)", attempt, max_retries)
         try:
             res = client.images.generate(model="dall-e-3", prompt=prompt_base, size=IMAGE_SIZE, quality="standard", n=1, timeout=PER_IMAGE_TIMEOUT)
         except Exception:
@@ -323,11 +370,10 @@ def generate_single_image(character_profile, artist_description, previous_backgr
                 prompt_base += " MUST include: " + ", ".join(missing) + "."
             else:
                 prompt_base += " Emphasize scene elements and character features."
-            # retry
     return {"dataurl": last_dataurl, "attempts": attempt, "ok": False}
 
 # ─────────────────────────────
-# /generate-full 엔드포인트: 스토리 생성 → 병렬 이미지 생성 → 응답
+# /generate-full 엔드포인트
 # ─────────────────────────────
 @app.post("/generate-full")
 def generate_full():
@@ -347,7 +393,6 @@ def generate_full():
     story = generate_story_text(name, age, gender, topic)
 
     chapters = story.get("chapters", []) or []
-    # ensure artist_description exists for each chapter
     previous_bg = None
     scenes = []
     for ch in chapters:
@@ -368,26 +413,17 @@ def generate_full():
     warnings = []
     metrics = {"image_attempts": [], "total_images": 0, "successful_images": 0, "generation_time": 0.0}
 
-    # if images requested, generate them in parallel but respect GLOBAL_TOTAL_TIMEOUT
     if generate_images:
         total_timeout = GLOBAL_TOTAL_TIMEOUT
-        time_remaining = lambda: max(0.0, total_timeout - (time.time() - start_time))
-        # ThreadPoolExecutor for per-scene generation
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_index = {}
-            for idx, sc in enumerate(scenes):
-                # submit a wrapper that calls generate_single_image with per-call settings
-                future = executor.submit(generate_single_image, character, sc["artist_description"], sc["prev_bg"], max_retries=max_image_retries)
-                future_to_index[future] = idx
-            # collect results with attention to global timeout
+            futures = {executor.submit(generate_single_image, character, sc["artist_description"], sc["prev_bg"], max_image_retries): idx for idx, sc in enumerate(scenes)}
             try:
-                done, not_done = wait(future_to_index.keys(), timeout=total_timeout, return_when=as_completed)
+                done, not_done = wait(futures.keys(), timeout=total_timeout)
             except Exception:
                 done = set()
-                not_done = set(future_to_index.keys())
-            # gather done results
+                not_done = set(futures.keys())
             for fut in done:
-                idx = future_to_index[fut]
+                idx = futures[fut]
                 try:
                     res = fut.result(timeout=1)
                     image_results[idx] = res
@@ -396,14 +432,13 @@ def generate_full():
                     logging.exception("Future result error for index %s", idx)
                     image_results[idx] = None
                     metrics["image_attempts"].append(0)
-            # cancel not_done futures
             for fut in not_done:
-                idx = future_to_index[fut]
+                idx = futures[fut]
                 fut.cancel()
                 image_results[idx] = None
                 metrics["image_attempts"].append(0)
                 warnings.append(f"Image generation timed out for scene {idx+1}")
-    # assemble final chapters with images (dataurls) or nulls
+
     for i, ch in enumerate(chapters):
         img_info = image_results[i] if i < len(image_results) else None
         img_dataurl = img_info["dataurl"] if img_info and isinstance(img_info, dict) else None
@@ -437,15 +472,14 @@ def generate_full():
     return jsonify(final)
 
 # ─────────────────────────────
-# 단순 헬스체크
+# 헬스체크
 # ─────────────────────────────
 @app.get("/health")
 def health():
     return jsonify({"status":"ok", "time": time.time()})
 
 # ─────────────────────────────
-# 실행
+# 실행용
 # ─────────────────────────────
 if __name__ == "__main__":
-    # 개발용: flask 내장 서버 (프로덕션은 gunicorn 사용 권장)
-    app.run(host="0.0.0.0", port=GUNICORN_BIND_PORT)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
