@@ -55,28 +55,29 @@ def generate_character_profile(name, age, gender):
 def generate_image(chapter_content, character_profile, chapter_index):
     """DALL-E를 사용하여 동화 이미지 생성"""
     try:
-        # 챕터 내용을 기반으로 더 구체적인 프롬프트 생성
+        # 챕터 내용 추출
         title = chapter_content.get("title", "")
         paragraphs = chapter_content.get("paragraphs", [])
-        illustration = chapter_content.get("illustration", "")
+        illustration_desc = chapter_content.get("illustration", "")
         
-        # 실제 스토리 내용을 포함한 프롬프트 생성
-        story_text = " ".join(paragraphs)
-        visual_desc = character_profile.get("visual", {}).get("canonical", "")
+        # 캐릭터 정보
+        character_name = character_profile.get("name", "")
+        character_style = character_profile.get("style", "")
         
-        # 더 구체적인 이미지 프롬프트
-        full_prompt = f"""
-        Children's book illustration for chapter {chapter_index + 1}: "{title}"
+        # illustration 필드를 우선 사용하고, 없으면 스토리 내용 사용
+        if illustration_desc and len(illustration_desc.strip()) > 10:
+            scene_description = illustration_desc
+        else:
+            # 스토리 내용에서 핵심 키워드 추출
+            story_text = " ".join(paragraphs)
+            scene_description = story_text[:150]
         
-        Story scene: {story_text}
-        
-        Character description: {visual_desc}
-        
-        Style: Warm, colorful children's book illustration, soft lighting, friendly atmosphere, detailed but simple for children aged 5-9
-        """.strip()
+        # 간단하고 명확한 프롬프트
+        full_prompt = f"Children's book illustration: {scene_description}. Character: {character_name}, {character_style}. Bright, warm colors, friendly style."
         
         logger.info(f"🖼️ 이미지 생성 시작 (챕터 {chapter_index + 1}): {title}")
-        logger.info(f"📖 스토리 내용: {story_text[:100]}...")
+        logger.info(f"📖 장면 설명: {scene_description}")
+        logger.info(f"🎨 프롬프트: {full_prompt}")
         
         response = client.images.generate(
             model="dall-e-3",
@@ -108,7 +109,7 @@ def generate_story_text(name, age, gender, topic):
     {{
       "title": "",
       "paragraphs": ["", ""],
-      "illustration": ""
+      "illustration": "구체적인 장면 설명 (예: 아이가 공원에서 친구와 놀고 있는 모습, 밝은 색깔의 나무와 꽃이 있는 배경)"
     }}
   ],
   "ending": ""
@@ -119,6 +120,7 @@ def generate_story_text(name, age, gender, topic):
 - 총 5개 챕터
 - 각 챕터는 "paragraphs" 리스트 형태로 2~4문장 나눠서 작성
 - 각 챕터는 "title", "paragraphs", "illustration" 포함
+- "illustration" 필드는 해당 챕터의 핵심 장면을 구체적으로 설명 (배경, 행동, 감정 등)
 - 마지막에 "ending" 추가
 - 반드시 위 JSON 구조만 반환. 다른 텍스트나 설명 포함 금지.
 """.strip()
