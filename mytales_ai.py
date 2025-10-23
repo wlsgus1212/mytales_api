@@ -276,10 +276,21 @@ def admin():
     return render_template("admin.html")
 
 # ───── API 엔드포인트 ─────
-@app.route("/generate-full", methods=["POST"])
+@app.route("/generate-full", methods=["POST", "OPTIONS"])
 def generate_full():
     """Wix에서 호출하는 메인 API 엔드포인트"""
+    
+    # CORS preflight 요청 처리
+    if request.method == "OPTIONS":
+        response = jsonify({"status": "ok"})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        return response
+    
     try:
+        logger.info("🚀 /generate-full 요청 시작")
+        
         data = request.get_json(force=True)
         name = data.get("name", "").strip()
         age = data.get("age", "").strip()
@@ -287,11 +298,14 @@ def generate_full():
         topic = data.get("topic", data.get("education_goal", "")).strip()
         generate_images = data.get("generate_images", True)
 
-        print(f"📝 요청 받음: {name}, {age}, {gender}, {topic}")
+        logger.info(f"📝 요청 데이터: {name}, {age}, {gender}, {topic}, 이미지생성: {generate_images}")
 
         if not all([name, age, gender, topic]):
+            logger.error("❌ 입력 데이터 누락")
             return jsonify({"error": "입력 누락"}), 400
 
+        logger.info("🎨 동화 생성 시작...")
+        
         # 이미지 생성 여부에 따라 다른 함수 사용
         if generate_images:
             result = generate_story_with_images(name, age, gender, topic)
@@ -305,12 +319,23 @@ def generate_full():
                 "ending": story.get("ending", "")
             }
 
-        print(f"✅ 동화 생성 완료: {result.get('title')}")
-        return jsonify(result)
+        logger.info(f"✅ 동화 생성 완료: {result.get('title')}")
+        
+        # CORS 헤더 추가
+        response = jsonify(result)
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        
+        return response
 
     except Exception as e:
-        print(f"❌ 오류 발생: {str(e)}")
-        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
+        logger.error(f"❌ /generate-full 오류: {str(e)}")
+        error_response = jsonify({"error": f"서버 오류: {str(e)}"})
+        error_response.headers.add("Access-Control-Allow-Origin", "*")
+        error_response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        error_response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        return error_response, 500
 
 # ───── 추가 API 엔드포인트 ─────
 @app.route("/api/get-story", methods=["GET"])
@@ -323,12 +348,25 @@ def get_story():
 @app.route("/health", methods=["GET"])
 def health_check():
     """서버 상태 확인"""
-    return jsonify({"status": "healthy", "timestamp": time.time()})
+    logger.info("🏥 Health check 요청")
+    response = jsonify({"status": "healthy", "timestamp": time.time()})
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    return response
 
-@app.route("/test", methods=["POST"])
+@app.route("/test", methods=["POST", "OPTIONS"])
 def test_generation():
     """테스트용 동화 생성 (이미지 없이)"""
+    
+    # CORS preflight 요청 처리
+    if request.method == "OPTIONS":
+        response = jsonify({"status": "ok"})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        return response
+    
     try:
+        logger.info("🧪 테스트 동화 생성 시작")
         data = request.get_json(force=True)
         name = data.get("name", "테스트")
         age = data.get("age", "6")
@@ -338,14 +376,28 @@ def test_generation():
         character = generate_character_profile(name, age, gender)
         story = generate_story_text(name, age, gender, topic)
         
-        return jsonify({
+        result = {
             "title": story.get("title"),
             "character_profile": character,
             "chapters": story.get("chapters", []),
             "ending": story.get("ending", "")
-        })
+        }
+        
+        logger.info(f"✅ 테스트 동화 생성 완료: {result.get('title')}")
+        
+        response = jsonify(result)
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        
+        return response
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"❌ 테스트 오류: {str(e)}")
+        error_response = jsonify({"error": str(e)})
+        error_response.headers.add("Access-Control-Allow-Origin", "*")
+        error_response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        error_response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        return error_response, 500
 
 # ───── 실행 ─────
 if __name__ == "__main__":
