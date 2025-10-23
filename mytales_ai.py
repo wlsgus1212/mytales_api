@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session
+rom flask import Flask, request, jsonify, render_template, redirect, url_for, session
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -33,6 +33,7 @@ def clean_text(s):
     return re.sub(r'[\"<>]', '', (s or "")).strip()
 
 def generate_character_profile(name, age, gender):
+    """일관된 캐릭터 프로필 생성"""
     # 더 다양하고 구체적인 캐릭터 외모 생성
     hair_styles = [
         "짧은 갈색 곱슬머리", "긴 검은 생머리", "웨이브 밤색 머리",
@@ -49,8 +50,8 @@ def generate_character_profile(name, age, gender):
     hair = random.choice(hair_styles)
     outfit = random.choice(outfits)
     
-    # 더 구체적인 캐릭터 설명
-    canonical = f"Canonical Visual Descriptor: {hair}; wearing {outfit}; round face with soft cheeks; warm brown almond eyes; childlike proportions; friendly and cute appearance."
+    # 매우 구체적이고 일관된 캐릭터 설명
+    canonical = f"Canonical Visual Descriptor: {name} is a {age}-year-old {gender} child with {hair}, wearing {outfit}. Round face with soft cheeks, warm brown almond eyes, childlike proportions, friendly and cute appearance. This exact same character must appear consistently in every scene with identical appearance."
     
     logger.info(f"👶 캐릭터 프로필 생성: {name} - {hair}, {outfit}")
     
@@ -66,7 +67,8 @@ def generate_character_profile(name, age, gender):
             "face": "부드러운 볼의 둥근 얼굴",
             "eyes": "따뜻한 갈색 아몬드형 눈",
             "proportions": "아이 같은 비율",
-            "personality": "친근하고 귀여운 외모"
+            "personality": "친근하고 귀여운 외모",
+            "consistency": "모든 장면에서 동일한 외모 유지"
         }
     }
 
@@ -79,31 +81,32 @@ def generate_image(chapter_content, character_profile, chapter_index):
         paragraphs = chapter_content.get("paragraphs", [])
         illustration_desc = chapter_content.get("illustration", "")
         
-        # 캐릭터 정보
+        # 캐릭터 정보 - 더 구체적으로
         character_name = character_profile.get("name", "")
         character_style = character_profile.get("style", "")
+        visual_desc = character_profile.get("visual", {}).get("canonical", "")
         
-        # illustration 필드를 우선 사용 (훈육 동화봇이 생성한 구체적인 설명)
+        # illustration 필드를 우선 사용하되, 더 구체적으로 만들기
         if illustration_desc and len(illustration_desc.strip()) > 10:
             scene_description = illustration_desc
-            logger.info(f"📖 훈육 동화봇의 삽화 설명 사용: {scene_description}")
         else:
-            # 백업: 스토리 내용에서 핵심 키워드 추출
+            # 스토리 내용에서 핵심 키워드 추출
             story_text = " ".join(paragraphs)
             scene_description = f"{title}: {story_text[:100]}"
-            logger.info(f"📖 스토리 내용 기반 설명 사용: {scene_description}")
         
-        # 더 구체적이고 아름다운 프롬프트 생성
+        # 매우 구체적이고 일관된 캐릭터 설명이 포함된 프롬프트
         full_prompt = f"""
-        Children's book illustration: {scene_description}
+        Children's book illustration for chapter {chapter_index + 1}: {scene_description}
         
-        Character: {character_name}, {character_style}
+        Main character: {character_name}, {visual_desc}
         
-        Style: Warm, colorful, friendly children's book art style. Soft lighting, bright colors, cute and adorable atmosphere. Perfect for ages 5-9.
+        Style: Consistent children's book illustration style. Same character throughout all scenes. Warm, colorful, friendly art style. Soft lighting, bright colors, cute and adorable atmosphere. Perfect for ages 5-9. Character must look exactly the same in every scene.
         """.strip()
         
         logger.info(f"🖼️ 이미지 생성 시작 (챕터 {chapter_index + 1}): {title}")
-        logger.info(f"🎨 최종 프롬프트: {full_prompt}")
+        logger.info(f"📖 장면 설명: {scene_description}")
+        logger.info(f"👤 캐릭터: {character_name} - {character_style}")
+        logger.info(f"🎨 프롬프트: {full_prompt}")
         
         response = client.images.generate(
             model="dall-e-3",
@@ -122,6 +125,7 @@ def generate_image(chapter_content, character_profile, chapter_index):
 
 # ───── 스토리 생성 ─────
 def generate_story_text(name, age, gender, topic):
+    """훈육 동화봇을 사용한 스토리 생성"""
     logger.info(f"📝 스토리 생성 시작: {name}({age}세, {gender}) - {topic}")
     prompt = f"""
 당신은 "훈육 동화봇"입니다. 5~9세 아동을 위한 훈육 중심의 동화를 제작하는 데 최적화되어 있습니다.
@@ -143,16 +147,21 @@ def generate_story_text(name, age, gender, topic):
 - 따뜻하고 귀여운 분위기
 - 친숙한 동물, 장난감, 자연 배경 등 상상력을 자극하는 요소 활용
 
+## ⚠️ 중요 지시사항
+- 주인공 {name}은 모든 챕터에서 동일한 외모와 성격을 유지해야 합니다
+- 각 챕터는 이전 챕터와 자연스럽게 연결되어야 합니다
+- 삽화 설명은 해당 챕터의 핵심 장면을 정확히 반영해야 합니다
+
 반드시 아래 JSON 형식만 응답하세요:
 
 {{
   "title": "동화 제목",
-  "character": "주인공 소개",
+  "character": "주인공 {name} 소개",
   "chapters": [
     {{
       "title": "챕터 제목",
       "paragraphs": ["문장1", "문장2", "문장3"],
-      "illustration": "구체적인 삽화 설명 (예: 햇살이 비치는 창가에 혼자 앉아 있는 {name}, 곰 인형을 꼭 안고 있어요)"
+      "illustration": "매우 구체적인 삽화 설명 (예: 햇살이 비치는 창가에 혼자 앉아 있는 {name}, 곰 인형을 꼭 안고 있어요. {name}의 얼굴에는 슬픈 표정이 있어요)"
     }}
   ],
   "ending": "마무리 메시지"
@@ -162,7 +171,7 @@ def generate_story_text(name, age, gender, topic):
 - 이름: {name}, 나이: {age}, 성별: {gender}, 훈육주제: {topic}
 - 총 5개 챕터로 구성
 - 각 챕터는 "paragraphs" 리스트 형태로 2~4문장 나눠서 작성
-- "illustration" 필드는 해당 챕터의 핵심 장면을 구체적으로 설명 (배경, 행동, 감정, 색깔 등)
+- "illustration" 필드는 해당 챕터의 핵심 장면을 매우 구체적으로 설명 (배경, 행동, 감정, 색깔, 표정 등)
 - 친근하고 따뜻한 말투, 짧고 간결한 문장 사용
 - 반복과 리듬감을 살린 이야기체
 - 아이의 눈높이에 맞춘 단어 선택
