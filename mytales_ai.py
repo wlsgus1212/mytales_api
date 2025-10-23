@@ -2,21 +2,31 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for, s
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-import os, random, re, json, time, base64
+import os, random, re, json, time, base64, logging
 from io import BytesIO
 from PIL import Image
 import requests
+
+# ───── 로깅 설정 ─────
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ───── 환경 설정 ─────
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
+    logger.error("OPENAI_API_KEY not found!")
     raise RuntimeError("OPENAI_API_KEY not found.")
+
+logger.info("🚀 MyTales 서버 시작 중...")
+logger.info(f"OpenAI API Key 설정됨: {API_KEY[:10]}...")
 
 client = OpenAI(api_key=API_KEY)
 app = Flask(__name__)
 CORS(app)
 app.secret_key = 'mytales_secret_key_2024'  # 세션을 위한 시크릿 키
+
+logger.info("✅ Flask 앱 초기화 완료")
 
 # ───── 유틸 함수 ─────
 def clean_text(s):
@@ -42,11 +52,31 @@ def generate_character_profile(name, age, gender):
     }
 
 # ───── 이미지 생성 함수 ─────
-def generate_image(prompt, character_profile):
+def generate_image(chapter_content, character_profile, chapter_index):
     """DALL-E를 사용하여 동화 이미지 생성"""
     try:
+        # 챕터 내용을 기반으로 더 구체적인 프롬프트 생성
+        title = chapter_content.get("title", "")
+        paragraphs = chapter_content.get("paragraphs", [])
+        illustration = chapter_content.get("illustration", "")
+        
+        # 실제 스토리 내용을 포함한 프롬프트 생성
+        story_text = " ".join(paragraphs)
         visual_desc = character_profile.get("visual", {}).get("canonical", "")
-        full_prompt = f"{prompt}. {visual_desc}. Children's book illustration style, warm colors, soft lighting."
+        
+        # 더 구체적인 이미지 프롬프트
+        full_prompt = f"""
+        Children's book illustration for chapter {chapter_index + 1}: "{title}"
+        
+        Story scene: {story_text}
+        
+        Character description: {visual_desc}
+        
+        Style: Warm, colorful children's book illustration, soft lighting, friendly atmosphere, detailed but simple for children aged 5-9
+        """.strip()
+        
+        logger.info(f"🖼️ 이미지 생성 시작 (챕터 {chapter_index + 1}): {title}")
+        logger.info(f"📖 스토리 내용: {story_text[:100]}...")
         
         response = client.images.generate(
             model="dall-e-3",
@@ -56,13 +86,16 @@ def generate_image(prompt, character_profile):
             n=1,
         )
         
-        return response.data[0].url
+        image_url = response.data[0].url
+        logger.info(f"✅ 이미지 생성 완료 (챕터 {chapter_index + 1}): {image_url}")
+        return image_url
     except Exception as e:
-        print(f"이미지 생성 오류: {e}")
+        logger.error(f"❌ 이미지 생성 오류 (챕터 {chapter_index + 1}): {e}")
         return None
 
 # ───── 스토리 생성 ─────
 def generate_story_text(name, age, gender, topic):
+    logger.info(f"📝 스토리 생성 시작: {name}({age}세, {gender}) - {topic}")
     prompt = f"""
 당신은 5~9세 어린이를 위한 따뜻하고 리드미컬한 동화 작가입니다.
 
@@ -90,46 +123,62 @@ def generate_story_text(name, age, gender, topic):
 - 반드시 위 JSON 구조만 반환. 다른 텍스트나 설명 포함 금지.
 """.strip()
 
-    res = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "Respond only with valid JSON for a children's picture book."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.6,
-        max_tokens=1500,
-    )
-
-    raw = res.choices[0].message.content.strip()
-    cleaned = re.sub(r'```(?:json)?', '', raw).strip()
     try:
-        return json.loads(cleaned)
-    except:
-        m = re.search(r'(\{[\s\S]+\})', cleaned)
-        return json.loads(m.group(1)) if m else {}
+        res = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Respond only with valid JSON for a children's picture book."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.6,
+            max_tokens=1500,
+        )
+
+        raw = res.choices[0].message.content.strip()
+        cleaned = re.sub(r'```(?:json)?', '', raw).strip()
+        try:
+            result = json.loads(cleaned)
+            logger.info(f"✅ 스토리 생성 완료: {result.get('title', '제목 없음')}")
+            return result
+        except:
+            m = re.search(r'(\{[\s\S]+\})', cleaned)
+            result = json.loads(m.group(1)) if m else {}
+            logger.warning("⚠️ JSON 파싱 재시도 성공")
+            return result
+    except Exception as e:
+        logger.error(f"❌ 스토리 생성 오류: {e}")
+        return {}
 
 def generate_story_with_images(name, age, gender, topic):
     """스토리와 이미지를 함께 생성"""
+    logger.info(f"🎨 스토리+이미지 생성 시작: {name}({age}세, {gender}) - {topic}")
+    
     character = generate_character_profile(name, age, gender)
     story = generate_story_text(name, age, gender, topic)
     
     # 각 챕터에 이미지 생성
     chapters = story.get("chapters", [])
-    for i, chapter in enumerate(chapters):
-        illustration_prompt = chapter.get("illustration", "")
-        if illustration_prompt:
-            image_url = generate_image(illustration_prompt, character)
-            chapter["image_url"] = image_url
-            print(f"챕터 {i+1} 이미지 생성 완료: {image_url}")
-        else:
-            chapter["image_url"] = None
+    logger.info(f"📚 총 {len(chapters)}개 챕터에 이미지 생성 시작")
     
-    return {
+    for i, chapter in enumerate(chapters):
+        logger.info(f"🖼️ 챕터 {i+1} 이미지 생성 중...")
+        image_url = generate_image(chapter, character, i)
+        chapter["image_url"] = image_url
+        
+        if image_url:
+            logger.info(f"✅ 챕터 {i+1} 이미지 생성 완료")
+        else:
+            logger.warning(f"⚠️ 챕터 {i+1} 이미지 생성 실패")
+    
+    result = {
         "title": story.get("title"),
         "character_profile": character,
         "chapters": chapters,
         "ending": story.get("ending", "")
     }
+    
+    logger.info(f"🎉 전체 동화+이미지 생성 완료: {result.get('title')}")
+    return result
 
 # ───── 라우트 정의 ─────
 @app.route("/")
