@@ -1,8 +1,11 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
-import os, random, re, json, time
+import os, random, re, json, time, base64
+from io import BytesIO
+from PIL import Image
+import requests
 
 # ───── 환경 설정 ─────
 load_dotenv()
@@ -13,6 +16,7 @@ if not API_KEY:
 client = OpenAI(api_key=API_KEY)
 app = Flask(__name__)
 CORS(app)
+app.secret_key = 'mytales_secret_key_2024'  # 세션을 위한 시크릿 키
 
 # ───── 유틸 함수 ─────
 def clean_text(s):
@@ -36,6 +40,26 @@ def generate_character_profile(name, age, gender):
             "proportions": "아이 같은 비율"
         }
     }
+
+# ───── 이미지 생성 함수 ─────
+def generate_image(prompt, character_profile):
+    """DALL-E를 사용하여 동화 이미지 생성"""
+    try:
+        visual_desc = character_profile.get("visual", {}).get("canonical", "")
+        full_prompt = f"{prompt}. {visual_desc}. Children's book illustration style, warm colors, soft lighting."
+        
+        response = client.images.generate(
+            model="dall-e-3",
+            prompt=full_prompt,
+            size="1024x1024",
+            quality="standard",
+            n=1,
+        )
+        
+        return response.data[0].url
+    except Exception as e:
+        print(f"이미지 생성 오류: {e}")
+        return None
 
 # ───── 스토리 생성 ─────
 def generate_story_text(name, age, gender, topic):
@@ -84,27 +108,149 @@ def generate_story_text(name, age, gender, topic):
         m = re.search(r'(\{[\s\S]+\})', cleaned)
         return json.loads(m.group(1)) if m else {}
 
+def generate_story_with_images(name, age, gender, topic):
+    """스토리와 이미지를 함께 생성"""
+    character = generate_character_profile(name, age, gender)
+    story = generate_story_text(name, age, gender, topic)
+    
+    # 각 챕터에 이미지 생성
+    chapters = story.get("chapters", [])
+    for i, chapter in enumerate(chapters):
+        illustration_prompt = chapter.get("illustration", "")
+        if illustration_prompt:
+            image_url = generate_image(illustration_prompt, character)
+            chapter["image_url"] = image_url
+            print(f"챕터 {i+1} 이미지 생성 완료: {image_url}")
+        else:
+            chapter["image_url"] = None
+    
+    return {
+        "title": story.get("title"),
+        "character_profile": character,
+        "chapters": chapters,
+        "ending": story.get("ending", "")
+    }
+
+# ───── 라우트 정의 ─────
+@app.route("/")
+def home():
+    return render_template("index.html")
+
+@app.route("/free-input")
+def free_input():
+    return render_template("free_input.html")
+
+@app.route("/free-preview")
+def free_preview():
+    return render_template("free_preview.html")
+
+@app.route("/free-full")
+def free_full():
+    return render_template("free_full.html")
+
+@app.route("/paid-test")
+def paid_test():
+    return render_template("paid_test.html")
+
+@app.route("/paid-preview")
+def paid_preview():
+    return render_template("paid_preview.html")
+
+@app.route("/paid-full")
+def paid_full():
+    return render_template("paid_full.html")
+
+@app.route("/payment")
+def payment():
+    return render_template("payment.html")
+
+@app.route("/mypage")
+def mypage():
+    return render_template("mypage.html")
+
+@app.route("/faq")
+def faq():
+    return render_template("faq.html")
+
+@app.route("/thank-you")
+def thank_you():
+    return render_template("thank_you.html")
+
+@app.route("/admin")
+def admin():
+    return render_template("admin.html")
+
 # ───── API 엔드포인트 ─────
 @app.route("/generate-full", methods=["POST"])
 def generate_full():
-    data = request.get_json(force=True)
-    name = data.get("name", "").strip()
-    age = data.get("age", "").strip()
-    gender = data.get("gender", "").strip()
-    topic = data.get("topic", data.get("education_goal", "")).strip()
+    """Wix에서 호출하는 메인 API 엔드포인트"""
+    try:
+        data = request.get_json(force=True)
+        name = data.get("name", "").strip()
+        age = data.get("age", "").strip()
+        gender = data.get("gender", "").strip()
+        topic = data.get("topic", data.get("education_goal", "")).strip()
+        generate_images = data.get("generate_images", True)
 
-    if not all([name, age, gender, topic]):
-        return jsonify({"error": "입력 누락"}), 400
+        print(f"📝 요청 받음: {name}, {age}, {gender}, {topic}")
 
-    character = generate_character_profile(name, age, gender)
-    story = generate_story_text(name, age, gender, topic)
+        if not all([name, age, gender, topic]):
+            return jsonify({"error": "입력 누락"}), 400
 
-    return jsonify({
-        "title": story.get("title"),
-        "character_profile": character,
-        "chapters": story.get("chapters", []),
-        "ending": story.get("ending", "")
-    })
+        # 이미지 생성 여부에 따라 다른 함수 사용
+        if generate_images:
+            result = generate_story_with_images(name, age, gender, topic)
+        else:
+            character = generate_character_profile(name, age, gender)
+            story = generate_story_text(name, age, gender, topic)
+            result = {
+                "title": story.get("title"),
+                "character_profile": character,
+                "chapters": story.get("chapters", []),
+                "ending": story.get("ending", "")
+            }
+
+        print(f"✅ 동화 생성 완료: {result.get('title')}")
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"❌ 오류 발생: {str(e)}")
+        return jsonify({"error": f"서버 오류: {str(e)}"}), 500
+
+# ───── 추가 API 엔드포인트 ─────
+@app.route("/api/get-story", methods=["GET"])
+def get_story():
+    story_data = session.get('story_result')
+    if not story_data:
+        return jsonify({"error": "스토리 데이터 없음"}), 404
+    return jsonify(story_data)
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """서버 상태 확인"""
+    return jsonify({"status": "healthy", "timestamp": time.time()})
+
+@app.route("/test", methods=["POST"])
+def test_generation():
+    """테스트용 동화 생성 (이미지 없이)"""
+    try:
+        data = request.get_json(force=True)
+        name = data.get("name", "테스트")
+        age = data.get("age", "6")
+        gender = data.get("gender", "남자")
+        topic = data.get("topic", "친구와의 우정")
+        
+        character = generate_character_profile(name, age, gender)
+        story = generate_story_text(name, age, gender, topic)
+        
+        return jsonify({
+            "title": story.get("title"),
+            "character_profile": character,
+            "chapters": story.get("chapters", []),
+            "ending": story.get("ending", "")
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ───── 실행 ─────
 if __name__ == "__main__":
