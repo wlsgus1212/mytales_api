@@ -23,7 +23,10 @@ logger.info(f"OpenAI API Key 설정됨: {API_KEY[:10]}...")
 
 client = OpenAI(api_key=API_KEY)
 app = Flask(__name__)
-CORS(app)
+
+# CORS 설정 강화
+CORS(app, origins="*", allow_headers=["Content-Type", "Authorization"], methods=["GET", "POST", "OPTIONS"])
+
 app.secret_key = 'mytales_secret_key_2024'  # 세션을 위한 시크릿 키
 
 logger.info("✅ Flask 앱 초기화 완료")
@@ -333,8 +336,9 @@ def generate_full():
         # CORS 헤더 추가
         response = jsonify(result)
         response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
         
         return response
 
@@ -342,8 +346,9 @@ def generate_full():
         logger.error(f"❌ /generate-full 오류: {str(e)}")
         error_response = jsonify({"error": f"서버 오류: {str(e)}"})
         error_response.headers.add("Access-Control-Allow-Origin", "*")
-        error_response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        error_response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        error_response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        error_response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        error_response.headers.add("Access-Control-Allow-Credentials", "true")
         return error_response, 500
 
 # ───── 추가 API 엔드포인트 ─────
@@ -354,13 +359,69 @@ def get_story():
         return jsonify({"error": "스토리 데이터 없음"}), 404
     return jsonify(story_data)
 
-@app.route("/health", methods=["GET"])
+@app.route("/health", methods=["GET", "OPTIONS"])
 def health_check():
     """서버 상태 확인"""
+    
+    # CORS preflight 요청 처리
+    if request.method == "OPTIONS":
+        response = jsonify({"status": "ok"})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        return response
+    
     logger.info("🏥 Health check 요청")
     response = jsonify({"status": "healthy", "timestamp": time.time()})
     response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
     return response
+
+@app.route("/simple-test", methods=["GET", "POST", "OPTIONS"])
+def simple_test():
+    """매우 간단한 테스트 엔드포인트"""
+    
+    # CORS preflight 요청 처리
+    if request.method == "OPTIONS":
+        response = jsonify({"status": "ok"})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        return response
+    
+    try:
+        logger.info("🧪 Simple test 요청 받음")
+        
+        # 간단한 응답
+        result = {
+            "status": "success",
+            "message": "서버가 정상적으로 작동 중입니다",
+            "timestamp": time.time(),
+            "test_data": {
+                "name": "테스트",
+                "age": "6",
+                "gender": "남자",
+                "topic": "친구와의 우정"
+            }
+        }
+        
+        logger.info("✅ Simple test 응답 준비 완료")
+        
+        response = jsonify(result)
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"❌ Simple test 오류: {str(e)}")
+        error_response = jsonify({"error": f"테스트 오류: {str(e)}"})
+        error_response.headers.add("Access-Control-Allow-Origin", "*")
+        error_response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        error_response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        return error_response, 500
 
 @app.route("/test", methods=["POST", "OPTIONS"])
 def test_generation():
