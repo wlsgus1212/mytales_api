@@ -115,6 +115,7 @@ def generate_image(chapter_content, character_profile, chapter_index):
         logger.info(f"📖 장면 설명: {scene_description}")
         logger.info(f"👤 캐릭터: {character_name} - {character_style}")
         logger.info(f"🎨 프롬프트: {full_prompt}")
+        logger.info(f"📝 이 이미지는 텍스트박스{6 + chapter_index}의 동화 내용을 반영합니다")
         
         # 비용 절약을 위한 설정
         model = "dall-e-2" if USE_CHEAPER_MODEL else "dall-e-3"
@@ -130,6 +131,7 @@ def generate_image(chapter_content, character_profile, chapter_index):
         
         image_url = response.data[0].url
         logger.info(f"✅ 이미지 생성 완료 (챕터 {chapter_index + 1}): {image_url}")
+        logger.info(f"📝 이 이미지는 텍스트박스{6 + chapter_index}의 동화 내용을 반영합니다")
         return image_url
     except Exception as e:
         logger.error(f"❌ 이미지 생성 오류 (챕터 {chapter_index + 1}): {e}")
@@ -326,6 +328,7 @@ def generate_story_with_images(name, age, gender, topic, generate_images=True):
     }
     
     logger.info(f"🎉 전체 동화+이미지 생성 완료: {result.get('title')}")
+    logger.info(f"📋 매칭 정보: 텍스트박스6↔이미지1, 텍스트박스7↔이미지2, ...")
     return result
 
 # ───── 라우트 정의 ─────
