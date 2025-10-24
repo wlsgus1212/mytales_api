@@ -1,120 +1,90 @@
-from flask import Flask, request, jsonify, render_template
-from flask_cors import CORS
-import openai
-import os
-import json
-import re
-import time
-import logging
-from dotenv import load_dotenv
-
-# 환경변수 로드
-load_dotenv()
-
-# Flask 앱 초기화
-app = Flask(__name__)
-CORS(app)
-
-# 로깅 설정
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# OpenAI 클라이언트 초기화
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# 전역 설정
-USE_CHEAPER_MODEL = True  # 비용 절약을 위한 저렴한 모델 사용
-SKIP_IMAGES_BY_DEFAULT = False  # 기본적으로 이미지 생성
-
-# ───── 캐릭터 프로필 생성 ─────
-def generate_character_profile(name, age, gender):
-    """캐릭터의 시각적 프로필 생성"""
-    logger.info(f"👶 캐릭터 프로필 생성: {name} - {age}세 {gender}")
-    
-    # 다양한 헤어스타일과 옷 스타일
-    hair_styles = [
-        "짧은 갈색 곱슬머리", "긴 검은 머리", "웨이브 밤색 머리", 
-        "짧은 금발 머리", "포니테일 머리", "보브 스타일 머리"
-    ]
-    outfits = [
-        "노란 셔츠와 파란 멜빵", "분홍 스웨터와 청바지", "하늘색 드레스",
-        "빨간 후드티와 검은 바지", "초록 체크 셔츠와 카키 바지", "보라색 원피스"
-    ]
-    
-    import random
-    hair_style = random.choice(hair_styles)
-    outfit = random.choice(outfits)
-    
-    character_profile = {
-        "name": name,
-        "age": age,
-        "gender": gender,
-        "visual_description": f"{hair_style}, 착용: {outfit}",
-        "canonical": f"{name} is a {age}-year-old {gender} child with {hair_style}, wearing {outfit}. Round face with soft cheeks, warm brown almond eyes, childlike proportions, friendly and cute appearance. This exact same character must appear consistently in every scene with identical appearance."
-    }
-    
-    logger.info(f"✅ 캐릭터 프로필 생성 완료: {name} - {hair_style}, 착용: {outfit}")
-    return character_profile
-
-# ───── 이미지 생성 (DALL-E 3 사용) ─────
-def generate_image(chapter_content, character_profile, chapter_index):
-    """DALL-E 3를 사용한 이미지 생성"""
-    try:
-        character_name = character_profile["name"]
-        visual_desc = character_profile["canonical"]
-        
-        # 챕터 정보 추출
-        title = chapter_content.get("title", f"챕터 {chapter_index + 1}")
-        paragraphs = chapter_content.get("paragraphs", [])
-        illustration = chapter_content.get("illustration", "")
-        
-        # 장면 설명 생성
-        if illustration:
-            scene_description = illustration
-        else:
-            story_text = " ".join(paragraphs)
-            scene_description = f"{title}: {story_text[:100]}"
-        
-        # DALL-E 3용 프롬프트 생성 (1000자 제한에 맞춰 간소화)
-        full_prompt = f"""Children's book illustration for chapter {chapter_index + 1}: {scene_description}
-
-Main character: {character_name}, {visual_desc}
-
-Style: High-quality children's book illustration. Wide-angle scene showing story environment. Character medium-sized, not dominating. Warm colors, soft lighting, friendly atmosphere for ages 5-9. Professional digital art quality with clear composition.
-
-The illustration must accurately reflect the story content: {scene_description}""".strip()
-        
-        logger.info(f"🖼️ 이미지 생성 시작 (챕터 {chapter_index + 1}): {title}")
-
-        response = client.images.generate(
-            prompt=full_prompt,
-            size="1024x1024",
-            n=1
-        )
-        
-        image_url = response.data[0].url
-        logger.info(f"✅ 이미지 생성 완료 (챕터 {chapter_index + 1})")
-        return image_url
-    except Exception as e:
-        logger.error(f"❌ 이미지 생성 오류 (챕터 {chapter_index + 1}): {e}")
-        if "429" in str(e) or "quota" in str(e).lower():
-            logger.warning(f"⚠️ DALL·E 3 할당량 초과, 챕터 {chapter_index + 1} 이미지 생략")
-        return None
-
-# ───── 스토리 생성 ─────
-def generate_story_text(name, age, gender, topic):
-    """훈육 동화봇을 사용한 스토리 생성"""
-    logger.info(f"📝 스토리 생성 시작: {name}({age}세, {gender}) - {topic}")
-    
-    # API 연결 테스트
-    try:
-        # 간단한 API 연결 테스트
-        test_response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": "test"}],
-            max_tokens=5
-        )
-        logger.info("✅ API 연결 정상")
+        try:
+            result = json.loads(cleaned)
+            logger.info(f"✅ JSON 파싱 성공: {result.get('title', '제목 없음')}")
+            return result
+        except json.JSONDecodeError as e:
+            logger.warning(f"⚠️ JSON 파싱 실패: {e}")
+            logger.info(f"🔍 문제 위치: {cleaned[max(0, e.pos-50):e.pos+50]}")
+            
+            # 더 강력한 JSON 추출 시도
+            try:
+                # JSON 부분만 추출
+                json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                    logger.info(f"🔧 JSON 부분 추출 시도: {json_str[:200]}...")
+                    
+                    # JSON 문자열 정리
+                    json_str = json_str.replace('\n', ' ').replace('\r', ' ')
+                    json_str = re.sub(r'\s+', ' ', json_str)  # 여러 공백을 하나로
+                    
+                    result = json.loads(json_str)
+                    logger.info(f"✅ JSON 재파싱 성공: {result.get('title', '제목 없음')}")
+                    return result
+            except Exception as e2:
+                logger.error(f"❌ JSON 재파싱도 실패: {e2}")
+            
+            # 마지막 시도: 수동으로 JSON 구조 생성
+            try:
+                logger.warning("⚠️ 수동 JSON 구조 생성 시도")
+                fallback_result = {
+                    "title": f"{name}의 {topic} 이야기",
+                    "character": f"{name}는 {age}세 {gender} 아이입니다",
+                    "chapters": [
+                        {
+                            "title": "도입",
+                            "paragraphs": [
+                                f"{name}는 {topic}에 대해 고민이 있었어요.",
+                                "하지만 새로운 마음으로 도전해보기로 했어요.",
+                                "그렇게 {name}의 여행이 시작되었어요."
+                            ],
+                            "illustration": f"{name}가 고민하는 모습을 보여주는 장면"
+                        },
+                        {
+                            "title": "갈등과 깨달음",
+                            "paragraphs": [
+                                f"{name}는 {topic} 때문에 어려움을 겪었어요.",
+                                "하지만 주변 사람들의 도움을 받았어요.",
+                                "그때 {name}는 중요한 것을 깨달았어요."
+                            ],
+                            "illustration": f"{name}가 깨달음을 얻는 순간"
+                        },
+                        {
+                            "title": "교훈과 가치관",
+                            "paragraphs": [
+                                f"{name}는 올바른 가치관을 배웠어요.",
+                                "이제 {topic}에 대해 다른 생각을 하게 되었어요.",
+                                "마음이 한결 가벼워졌어요."
+                            ],
+                            "illustration": f"{name}가 새로운 가치관을 배우는 모습"
+                        },
+                        {
+                            "title": "내면의 변화",
+                            "paragraphs": [
+                                f"{name}의 마음이 근본적으로 바뀌었어요.",
+                                "이제 {topic}에 대해 긍정적으로 생각해요.",
+                                "자신감이 생겼어요."
+                            ],
+                            "illustration": f"{name}가 자신감을 얻는 모습"
+                        },
+                        {
+                            "title": "성장과 희망",
+                            "paragraphs": [
+                                f"{name}는 더욱 성장했어요.",
+                                "새로운 도전을 두려워하지 않아요.",
+                                "앞으로도 계속 성장할 거예요!"
+                            ],
+                            "illustration": f"{name}가 미래를 향해 나아가는 모습"
+                        }
+                    ],
+                    "ending": f"{name}는 {topic}을 통해 소중한 교훈을 배웠어요. 앞으로도 계속 성장해 나갈 거예요!"
+                }
+                logger.info(f"✅ 수동 JSON 생성 성공: {fallback_result.get('title')}")
+                return fallback_result
+            except Exception as e3:
+                logger.error(f"❌ 수동 JSON 생성도 실패: {e3}")
+            
+            raise Exception("API 응답 파싱 실패")     logger.info("✅ API 연결 정상")
     except Exception as api_error:
         logger.error(f"❌ API 연결 실패: {api_error}")
         raise Exception(f"API 연결 실패: {api_error}")
@@ -212,17 +182,85 @@ def generate_story_text(name, age, gender, topic):
             return result
         except json.JSONDecodeError as e:
             logger.warning(f"⚠️ JSON 파싱 실패: {e}")
+            logger.info(f"🔍 문제 위치: {cleaned[max(0, e.pos-50):e.pos+50]}")
             
-            # JSON 부분만 추출
+            # 더 강력한 JSON 추출 시도
             try:
+                # JSON 부분만 추출
                 json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
                 if json_match:
                     json_str = json_match.group(0)
+                    logger.info(f"🔧 JSON 부분 추출 시도: {json_str[:200]}...")
+                    
+                    # JSON 문자열 정리
+                    json_str = json_str.replace('\n', ' ').replace('\r', ' ')
+                    json_str = re.sub(r'\s+', ' ', json_str)  # 여러 공백을 하나로
+                    
                     result = json.loads(json_str)
                     logger.info(f"✅ JSON 재파싱 성공: {result.get('title', '제목 없음')}")
                     return result
             except Exception as e2:
                 logger.error(f"❌ JSON 재파싱도 실패: {e2}")
+            
+            # 마지막 시도: 수동으로 JSON 구조 생성
+            try:
+                logger.warning("⚠️ 수동 JSON 구조 생성 시도")
+                fallback_result = {
+                    "title": f"{name}의 {topic} 이야기",
+                    "character": f"{name}는 {age}세 {gender} 아이입니다",
+                    "chapters": [
+                        {
+                            "title": "도입",
+                            "paragraphs": [
+                                f"{name}는 {topic}에 대해 고민이 있었어요.",
+                                "하지만 새로운 마음으로 도전해보기로 했어요.",
+                                "그렇게 {name}의 여행이 시작되었어요."
+                            ],
+                            "illustration": f"{name}가 고민하는 모습을 보여주는 장면"
+                        },
+                        {
+                            "title": "갈등과 깨달음",
+                            "paragraphs": [
+                                f"{name}는 {topic} 때문에 어려움을 겪었어요.",
+                                "하지만 주변 사람들의 도움을 받았어요.",
+                                "그때 {name}는 중요한 것을 깨달았어요."
+                            ],
+                            "illustration": f"{name}가 깨달음을 얻는 순간"
+                        },
+                        {
+                            "title": "교훈과 가치관",
+                            "paragraphs": [
+                                f"{name}는 올바른 가치관을 배웠어요.",
+                                "이제 {topic}에 대해 다른 생각을 하게 되었어요.",
+                                "마음이 한결 가벼워졌어요."
+                            ],
+                            "illustration": f"{name}가 새로운 가치관을 배우는 모습"
+                        },
+                        {
+                            "title": "내면의 변화",
+                            "paragraphs": [
+                                f"{name}의 마음이 근본적으로 바뀌었어요.",
+                                "이제 {topic}에 대해 긍정적으로 생각해요.",
+                                "자신감이 생겼어요."
+                            ],
+                            "illustration": f"{name}가 자신감을 얻는 모습"
+                        },
+                        {
+                            "title": "성장과 희망",
+                            "paragraphs": [
+                                f"{name}는 더욱 성장했어요.",
+                                "새로운 도전을 두려워하지 않아요.",
+                                "앞으로도 계속 성장할 거예요!"
+                            ],
+                            "illustration": f"{name}가 미래를 향해 나아가는 모습"
+                        }
+                    ],
+                    "ending": f"{name}는 {topic}을 통해 소중한 교훈을 배웠어요. 앞으로도 계속 성장해 나갈 거예요!"
+                }
+                logger.info(f"✅ 수동 JSON 생성 성공: {fallback_result.get('title')}")
+                return fallback_result
+            except Exception as e3:
+                logger.error(f"❌ 수동 JSON 생성도 실패: {e3}")
             
             raise Exception("API 응답 파싱 실패")
             
