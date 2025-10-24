@@ -75,39 +75,14 @@ def generate_image(chapter_content, character_profile, chapter_index):
             story_text = " ".join(paragraphs)
             scene_description = f"{title}: {story_text[:100]}"
         
-        # DALL-E 3용 프롬프트 생성 (더 상세하고 구체적으로)
-        full_prompt = f"""
-        A beautiful, high-quality children's book illustration for chapter {chapter_index + 1}: {scene_description}
+        # DALL-E 3용 프롬프트 생성 (1000자 제한에 맞춰 간소화)
+        full_prompt = f"""Children's book illustration for chapter {chapter_index + 1}: {scene_description}
 
-        CHARACTER DETAILS:
-        - Main character: {character_name}
-        - Character appearance: {visual_desc}
-        - Character must be clearly visible but not dominating the scene
+Main character: {character_name}, {visual_desc}
 
-        SCENE REQUIREMENTS:
-        - Show the specific story situation described: {scene_description}
-        - Include all relevant story elements and objects mentioned
-        - Create a warm, inviting atmosphere suitable for children ages 5-9
-        - Use bright, cheerful colors with soft lighting
-        - Include detailed background elements that support the story
+Style: High-quality children's book illustration. Wide-angle scene showing story environment. Character medium-sized, not dominating. Warm colors, soft lighting, friendly atmosphere for ages 5-9. Professional digital art quality with clear composition.
 
-        ARTISTIC STYLE:
-        - High-quality children's book illustration style
-        - Clean, detailed artwork with clear composition
-        - Professional digital art quality
-        - Warm and friendly color palette
-        - Soft shadows and gentle lighting
-        - Character should be medium-sized in the scene, not tiny or huge
-
-        COMPOSITION:
-        - Wide-angle view showing the story environment
-        - Character positioned naturally within the scene
-        - Background elements that enhance the story context
-        - Balanced composition with clear focal points
-        - Professional book illustration quality
-
-        The illustration must accurately reflect the story content and create an engaging visual narrative that complements the text.
-        """.strip()
+The illustration must accurately reflect the story content: {scene_description}""".strip()
         
         logger.info(f"🖼️ 이미지 생성 시작 (챕터 {chapter_index + 1}): {title}")
 
