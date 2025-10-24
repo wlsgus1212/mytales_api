@@ -103,7 +103,7 @@ def generate_image(chapter_content, character_profile, chapter_index):
         
         Main character: {character_name}, {visual_desc}
         
-        Style: Consistent children's book illustration style. Same character throughout all scenes. Warm, colorful, friendly art style. Soft lighting, bright colors, cute and adorable atmosphere. Perfect for ages 5-9. Character must look exactly the same in every scene.
+        Style: Wide-angle scene showing the story environment. Character should be small and distant in the scene, not a close-up portrait. Focus on the story setting, background, and situation. Consistent children's book illustration style. Warm, colorful, friendly art style. Soft lighting, bright colors, cute and adorable atmosphere. Perfect for ages 5-9. Show the character from a distance as part of the larger scene, not as the main focus.
         """.strip()
         
         logger.info(f"🖼️ 이미지 생성 시작 (챕터 {chapter_index + 1}): {title}")
@@ -146,7 +146,9 @@ def generate_story_text(name, age, gender, topic):
 
 ## 🎨 시각적 요소
 각 챕터마다 구체적인 삽화 설명을 포함하세요:
-- 예: "노란색 오리 인형을 안고 있는 아이가 방 한가운데 앉아 있어요"
+- 예: "노란색 오리 인형을 안고 있는 아이가 방 한가운데 앉아 있어요. 방에는 책상과 침대가 있고, 창문으로 햇살이 들어와요"
+- 배경과 환경을 자세히 설명 (방, 공원, 학교, 집 등)
+- 캐릭터의 행동과 감정 상태
 - 따뜻하고 귀여운 분위기
 - 친숙한 동물, 장난감, 자연 배경 등 상상력을 자극하는 요소 활용
 
@@ -164,7 +166,7 @@ def generate_story_text(name, age, gender, topic):
     {{
       "title": "챕터 제목",
       "paragraphs": ["문장1", "문장2", "문장3"],
-      "illustration": "매우 구체적인 삽화 설명 (예: 햇살이 비치는 창가에 혼자 앉아 있는 {name}, 곰 인형을 꼭 안고 있어요. {name}의 얼굴에는 슬픈 표정이 있어요)"
+      "illustration": "매우 구체적인 삽화 설명 (예: 햇살이 비치는 창가에 혼자 앉아 있는 {name}, 곰 인형을 꼭 안고 있어요. 방에는 책상과 침대가 있고, 창문으로 밝은 햇살이 들어와요. {name}은 작고 멀리서 보이는 모습으로, 방의 전체적인 분위기가 슬픈 느낌이에요)"
     }}
   ],
   "ending": "마무리 메시지"
@@ -174,7 +176,7 @@ def generate_story_text(name, age, gender, topic):
 - 이름: {name}, 나이: {age}, 성별: {gender}, 훈육주제: {topic}
 - 총 5개 챕터로 구성
 - 각 챕터는 "paragraphs" 리스트 형태로 2~4문장 나눠서 작성
-- "illustration" 필드는 해당 챕터의 핵심 장면을 매우 구체적으로 설명 (배경, 행동, 감정, 색깔, 표정 등)
+- "illustration" 필드는 해당 챕터의 핵심 장면을 매우 구체적으로 설명 (배경, 환경, 캐릭터의 행동과 위치, 감정, 색깔, 표정 등). 캐릭터는 작고 멀리서 보이는 모습으로, 전체 장면의 분위기와 상황을 중심으로 설명
 - 친근하고 따뜻한 말투, 짧고 간결한 문장 사용
 - 반복과 리듬감을 살린 이야기체
 - 아이의 눈높이에 맞춘 단어 선택
