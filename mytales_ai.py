@@ -1,102 +1,80 @@
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session
+from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
-from openai import OpenAI
+import openai
+import os
+import json
+import re
+import time
+import logging
 from dotenv import load_dotenv
-import os, random, re, json, time, base64, logging
-from io import BytesIO
-from PIL import Image
-import requests
 
-# ───── 로깅 설정 ─────
+# 환경변수 로드
+load_dotenv()
+
+# Flask 앱 초기화
+app = Flask(__name__)
+CORS(app)
+
+# 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ───── 환경 설정 ─────
-load_dotenv()
-API_KEY = os.getenv("OPENAI_API_KEY")
-if not API_KEY:
-    logger.error("OPENAI_API_KEY not found!")
-    raise RuntimeError("OPENAI_API_KEY not found.")
+# OpenAI 클라이언트 초기화
+openai.api_key = os.getenv("OPENAI_API_KEY")
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-logger.info("🚀 MyTales 서버 시작 중...")
-logger.info(f"OpenAI API Key 설정됨: {API_KEY[:10]}...")
+# 전역 설정
+USE_CHEAPER_MODEL = True  # 비용 절약을 위한 저렴한 모델 사용
+SKIP_IMAGES_BY_DEFAULT = False  # 기본적으로 이미지 생성
+MAX_RETRIES = 3
 
-client = OpenAI(api_key=API_KEY)
-app = Flask(__name__)
-
-# CORS 설정 강화
-CORS(app, origins="*", allow_headers=["Content-Type", "Authorization"], methods=["GET", "POST", "OPTIONS"])
-
-app.secret_key = 'mytales_secret_key_2024'  # 세션을 위한 시크릿 키
-
-logger.info("✅ Flask 앱 초기화 완료")
-
-# ───── 비용 및 속도 최적화 설정 ─────
-USE_CHEAPER_MODEL = True  # 더 저렴한 모델 사용 (DALL-E 2, GPT-3.5-turbo)
-SKIP_IMAGES_BY_DEFAULT = False  # 기본적으로 이미지 생성 활성화
-MAX_RETRIES = 2  # 재시도 횟수 제한
-
-# ───── 유틸 함수 ─────
-def clean_text(s):
-    return re.sub(r'[\"<>]', '', (s or "")).strip()
-
+# ───── 캐릭터 프로필 생성 ─────
 def generate_character_profile(name, age, gender):
-    """일관된 캐릭터 프로필 생성"""
-    # 더 다양하고 구체적인 캐릭터 외모 생성
+    """캐릭터의 시각적 프로필 생성"""
+    logger.info(f"👶 캐릭터 프로필 생성: {name} - {age}세 {gender}")
+    
+    # 다양한 헤어스타일과 옷 스타일
     hair_styles = [
-        "짧은 갈색 곱슬머리", "긴 검은 생머리", "웨이브 밤색 머리",
-        "단발 갈색 머리", "긴 금발 머리", "땋은 머리",
-        "짧은 검은 머리", "웨이브 갈색 머리"
+        "짧은 갈색 곱슬머리", "긴 검은 머리", "웨이브 밤색 머리", 
+        "짧은 금발 머리", "포니테일 머리", "보브 스타일 머리"
     ]
-    
     outfits = [
-        "노란 셔츠와 파란 멜빵", "빨간 물방울무늬 원피스", "초록 후드와 베이지 팬츠",
-        "분홍 스웨터와 청바지", "파란 체크 셔츠와 검은 바지", "노란 원피스",
-        "초록 티셔츠와 빨간 반바지", "보라 스웨터와 회색 바지"
+        "노란 셔츠와 파란 멜빵", "분홍 스웨터와 청바지", "하늘색 드레스",
+        "빨간 후드티와 검은 바지", "초록 체크 셔츠와 카키 바지", "보라색 원피스"
     ]
     
-    hair = random.choice(hair_styles)
+    # 간단한 캐릭터 프로필 생성
+    import random
+    hair_style = random.choice(hair_styles)
     outfit = random.choice(outfits)
     
-    # 매우 구체적이고 일관된 캐릭터 설명
-    canonical = f"Canonical Visual Descriptor: {name} is a {age}-year-old {gender} child with {hair}, wearing {outfit}. Round face with soft cheeks, warm brown almond eyes, childlike proportions, friendly and cute appearance. This exact same character must appear consistently in every scene with identical appearance."
-    
-    logger.info(f"👶 캐릭터 프로필 생성: {name} - {hair}, {outfit}")
-    
-    return {
+    character_profile = {
         "name": name,
         "age": age,
         "gender": gender,
-        "style": f"{hair}, 착용: {outfit}",
-        "visual": {
-            "canonical": canonical,
-            "hair": hair,
-            "outfit": outfit,
-            "face": "부드러운 볼의 둥근 얼굴",
-            "eyes": "따뜻한 갈색 아몬드형 눈",
-            "proportions": "아이 같은 비율",
-            "personality": "친근하고 귀여운 외모",
-            "consistency": "모든 장면에서 동일한 외모 유지"
-        }
+        "visual_description": f"{hair_style}, 착용: {outfit}",
+        "canonical": f"{name} is a {age}-year-old {gender} child with {hair_style}, wearing {outfit}. Round face with soft cheeks, warm brown almond eyes, childlike proportions, friendly and cute appearance. This exact same character must appear consistently in every scene with identical appearance."
     }
+    
+    logger.info(f"✅ 캐릭터 프로필 생성 완료: {name} - {hair_style}, 착용: {outfit}")
+    return character_profile
 
-# ───── 이미지 생성 함수 ─────
+# ───── 이미지 생성 ─────
 def generate_image(chapter_content, character_profile, chapter_index):
-    """DALL-E를 사용하여 동화 이미지 생성"""
+    """DALL-E를 사용한 이미지 생성"""
     try:
-        # 챕터 내용 추출
-        title = chapter_content.get("title", "")
+        character_name = character_profile["name"]
+        visual_desc = character_profile["canonical"]
+        character_style = character_profile["visual_description"]
+        
+        # 챕터 정보 추출
+        title = chapter_content.get("title", f"챕터 {chapter_index + 1}")
         paragraphs = chapter_content.get("paragraphs", [])
-        illustration_desc = chapter_content.get("illustration", "")
+        illustration = chapter_content.get("illustration", "")
         
-        # 캐릭터 정보 - 더 구체적으로
-        character_name = character_profile.get("name", "")
-        character_style = character_profile.get("style", "")
-        visual_desc = character_profile.get("visual", {}).get("canonical", "")
-        
-        # illustration 필드를 우선 사용하되, 더 구체적으로 만들기
-        if illustration_desc and len(illustration_desc.strip()) > 10:
-            scene_description = illustration_desc
+        # 장면 설명 생성
+        if illustration:
+            scene_description = illustration
         else:
             # 스토리 내용에서 핵심 키워드 추출
             story_text = " ".join(paragraphs)
@@ -106,7 +84,7 @@ def generate_image(chapter_content, character_profile, chapter_index):
         full_prompt = f"""
         Children's book illustration for chapter {chapter_index + 1}: {scene_description}
         
-        Main character: {character_name}, {visual_desc}
+        Main character: {character_name}, Canonical Visual Descriptor: {visual_desc}
         
         Style: Wide-angle scene showing the story environment. Character should be small and distant in the scene, not a close-up portrait. Focus on the story setting, background, and situation. Consistent children's book illustration style. Warm, colorful, friendly art style. Soft lighting, bright colors, cute and adorable atmosphere. Perfect for ages 5-9. Show the character from a distance as part of the larger scene, not as the main focus.
         """.strip()
@@ -118,11 +96,9 @@ def generate_image(chapter_content, character_profile, chapter_index):
         logger.info(f"📝 이 이미지는 텍스트박스{6 + chapter_index}의 동화 내용을 반영합니다")
         
         # 비용 절약을 위한 설정
-        model = "dall-e-2" if USE_CHEAPER_MODEL else "dall-e-3"
         size = "512x512" if USE_CHEAPER_MODEL else "1024x1024"
         
         response = client.images.generate(
-            model=model,
             prompt=full_prompt,
             size=size,
             quality="standard",
@@ -299,50 +275,47 @@ def generate_story_text(name, age, gender, topic):
                     return result
             except Exception as e2:
                 logger.error(f"❌ JSON 재파싱도 실패: {e2}")
-                
-            # 최후의 수단: 테스트용 동화 사용
+            
             logger.warning("⚠️ API 응답 파싱 실패, 테스트용 동화 사용")
             return generate_story_text_fallback(name, age, gender, topic)
+            
     except Exception as e:
         logger.error(f"❌ 스토리 생성 오류: {e}")
-        # API 오류 시 테스트용 동화 사용
         if "429" in str(e) or "quota" in str(e).lower():
             logger.warning("⚠️ API 할당량 초과, 테스트용 동화 사용")
             return generate_story_text_fallback(name, age, gender, topic)
-        return {}
+        else:
+            logger.error(f"❌ 예상치 못한 오류: {e}")
+            return generate_story_text_fallback(name, age, gender, topic)
 
 def generate_story_with_images(name, age, gender, topic, generate_images=True):
     """스토리와 이미지를 함께 생성"""
     logger.info(f"🎨 스토리+이미지 생성 시작: {name}({age}세, {gender}) - {topic}")
     
-    character = generate_character_profile(name, age, gender)
-    story = generate_story_text(name, age, gender, topic)
+    # 캐릭터 프로필 생성
+    character_profile = generate_character_profile(name, age, gender)
+    logger.info(f"👶 캐릭터 프로필 생성: {character_profile['name']} - {character_profile['visual_description']}")
     
-    # 이미지 생성 여부 확인
-    if not generate_images or SKIP_IMAGES_BY_DEFAULT:
-        logger.info("💰 비용 절약을 위해 이미지 생성 건너뜀")
-        chapters = story.get("chapters", [])
-        for chapter in chapters:
-            chapter["image_url"] = None
-    else:
-        # 각 챕터에 이미지 생성
-        chapters = story.get("chapters", [])
-        logger.info(f"📚 총 {len(chapters)}개 챕터에 이미지 생성 시작")
-        
-        for i, chapter in enumerate(chapters):
+    # 스토리 생성
+    story = generate_story_text(name, age, gender, topic)
+    logger.info(f"📝 스토리 생성 시작: {name}({age}세, {gender}) - {topic}")
+    
+    # 이미지 생성
+    if generate_images and not SKIP_IMAGES_BY_DEFAULT:
+        logger.info(f"📚 총 {len(story.get('chapters', []))}개 챕터에 이미지 생성 시작")
+        for i, chapter in enumerate(story.get('chapters', [])):
             logger.info(f"🖼️ 챕터 {i+1} 이미지 생성 중...")
-            image_url = generate_image(chapter, character, i)
-            chapter["image_url"] = image_url
-            
+            image_url = generate_image(chapter, character_profile, i)
             if image_url:
-                logger.info(f"✅ 챕터 {i+1} 이미지 생성 완료")
+                chapter['image_url'] = image_url
             else:
                 logger.warning(f"⚠️ 챕터 {i+1} 이미지 생성 실패")
     
+    # 결과 조합
     result = {
         "title": story.get("title"),
-        "character_profile": character,
-        "chapters": chapters,
+        "character_profile": character_profile,
+        "chapters": story.get("chapters", []),
         "ending": story.get("ending", "")
     }
     
@@ -350,9 +323,9 @@ def generate_story_with_images(name, age, gender, topic, generate_images=True):
     logger.info(f"📋 매칭 정보: 텍스트박스6↔이미지1, 텍스트박스7↔이미지2, ...")
     return result
 
-# ───── 라우트 정의 ─────
+# ───── HTML 템플릿 라우트 ─────
 @app.route("/")
-def home():
+def index():
     return render_template("index.html")
 
 @app.route("/free-input")
@@ -498,95 +471,58 @@ def health_check():
 
 @app.route("/simple-test", methods=["GET", "POST", "OPTIONS"])
 def simple_test():
-    """매우 간단한 테스트 엔드포인트"""
+    """간단한 테스트 엔드포인트"""
     
     # CORS preflight 요청 처리
     if request.method == "OPTIONS":
         response = jsonify({"status": "ok"})
         response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
         response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         return response
     
-    try:
-        logger.info("🧪 Simple test 요청 받음")
-        
-        # 간단한 응답
-        result = {
-            "status": "success",
-            "message": "서버가 정상적으로 작동 중입니다",
-            "timestamp": time.time(),
-            "test_data": {
-                "name": "테스트",
-                "age": "6",
-                "gender": "남자",
-                "topic": "친구와의 우정"
-            }
-        }
-        
-        logger.info("✅ Simple test 응답 준비 완료")
-        
-        response = jsonify(result)
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        
-        return response
-        
-    except Exception as e:
-        logger.error(f"❌ Simple test 오류: {str(e)}")
-        error_response = jsonify({"error": f"테스트 오류: {str(e)}"})
-        error_response.headers.add("Access-Control-Allow-Origin", "*")
-        error_response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        error_response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        return error_response, 500
+    logger.info("🧪 Simple test 요청")
+    response = jsonify({
+        "message": "서버가 정상 작동 중입니다!",
+        "timestamp": time.time(),
+        "status": "success"
+    })
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    return response
 
-@app.route("/test", methods=["POST", "OPTIONS"])
-def test_generation():
-    """테스트용 동화 생성 (이미지 없이)"""
+@app.route("/test", methods=["GET", "POST", "OPTIONS"])
+def test_endpoint():
+    """테스트용 엔드포인트"""
     
     # CORS preflight 요청 처리
     if request.method == "OPTIONS":
         response = jsonify({"status": "ok"})
         response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         return response
     
-    try:
-        logger.info("🧪 테스트 동화 생성 시작")
+    logger.info("🔬 Test endpoint 요청")
+    
+    if request.method == "POST":
         data = request.get_json(force=True)
-        name = data.get("name", "테스트")
-        age = data.get("age", "6")
-        gender = data.get("gender", "남자")
-        topic = data.get("topic", "친구와의 우정")
-        
-        character = generate_character_profile(name, age, gender)
-        story = generate_story_text(name, age, gender, topic)
-        
-        result = {
-            "title": story.get("title"),
-            "character_profile": character,
-            "chapters": story.get("chapters", []),
-            "ending": story.get("ending", "")
-        }
-        
-        logger.info(f"✅ 테스트 동화 생성 완료: {result.get('title')}")
-        
-        response = jsonify(result)
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
-        
-        return response
-    except Exception as e:
-        logger.error(f"❌ 테스트 오류: {str(e)}")
-        error_response = jsonify({"error": str(e)})
-        error_response.headers.add("Access-Control-Allow-Origin", "*")
-        error_response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        error_response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
-        return error_response, 500
+        logger.info(f"📝 POST 데이터: {data}")
+    
+    response = jsonify({
+        "message": "테스트 성공!",
+        "method": request.method,
+        "timestamp": time.time(),
+        "data": request.get_json(force=True) if request.method == "POST" else None
+    })
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    return response
 
-# ───── 실행 ─────
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    logger.info("🚀 MyTales AI 서버 시작")
+    logger.info(f"💰 저렴한 모델 사용: {USE_CHEAPER_MODEL}")
+    logger.info(f"🖼️ 이미지 생성 기본값: {not SKIP_IMAGES_BY_DEFAULT}")
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
