@@ -31,6 +31,11 @@ app.secret_key = 'mytales_secret_key_2024'  # 세션을 위한 시크릿 키
 
 logger.info("✅ Flask 앱 초기화 완료")
 
+# ───── 비용 및 속도 최적화 설정 ─────
+USE_CHEAPER_MODEL = True  # 더 저렴한 모델 사용 (DALL-E 2, GPT-3.5-turbo)
+SKIP_IMAGES_BY_DEFAULT = False  # 기본적으로 이미지 생성 활성화
+MAX_RETRIES = 2  # 재시도 횟수 제한
+
 # ───── 유틸 함수 ─────
 def clean_text(s):
     return re.sub(r'[\"<>]', '', (s or "")).strip()
@@ -111,10 +116,14 @@ def generate_image(chapter_content, character_profile, chapter_index):
         logger.info(f"👤 캐릭터: {character_name} - {character_style}")
         logger.info(f"🎨 프롬프트: {full_prompt}")
         
+        # 비용 절약을 위한 설정
+        model = "dall-e-2" if USE_CHEAPER_MODEL else "dall-e-3"
+        size = "512x512" if USE_CHEAPER_MODEL else "1024x1024"
+        
         response = client.images.generate(
-            model="dall-e-3",
+            model=model,
             prompt=full_prompt,
-            size="1024x1024",
+            size=size,
             quality="standard",
             n=1,
         )
@@ -124,9 +133,73 @@ def generate_image(chapter_content, character_profile, chapter_index):
         return image_url
     except Exception as e:
         logger.error(f"❌ 이미지 생성 오류 (챕터 {chapter_index + 1}): {e}")
+        # API 오류 시 이미지 없이 진행
+        if "429" in str(e) or "quota" in str(e).lower():
+            logger.warning(f"⚠️ 이미지 생성 API 할당량 초과, 챕터 {chapter_index + 1} 이미지 건너뜀")
         return None
 
 # ───── 스토리 생성 ─────
+def generate_story_text_fallback(name, age, gender, topic):
+    """API 없이 테스트용 동화 생성"""
+    logger.info(f"📝 테스트용 동화 생성: {name}({age}세, {gender}) - {topic}")
+    
+    # 간단한 테스트 동화 데이터
+    test_story = {
+        "title": f"{name}의 {topic} 이야기",
+        "character": f"{name}는 {age}세 {gender} 아이입니다",
+        "chapters": [
+            {
+                "title": "아침 식사 시간",
+                "paragraphs": [
+                    f"{name}는 아침에 일어나서 식탁에 앉았어요.",
+                    "엄마가 준비한 음식을 보니 {topic} 때문에 고민이 되었어요.",
+                    "하지만 용기를 내어 새로운 음식을 먹어보기로 했어요."
+                ],
+                "illustration": f"아침 식탁에 앉아 있는 {name}. 식탁에는 다양한 음식이 놓여 있고, 창문으로 따뜻한 햇살이 들어와요. {name}은 작고 멀리서 보이는 모습으로, 식탁의 전체적인 분위기가 따뜻해요."
+            },
+            {
+                "title": "친구와의 만남",
+                "paragraphs": [
+                    f"학교에서 친구들과 함께 점심을 먹을 때였어요.",
+                    f"{name}는 친구들이 {topic}에 대해 이야기하는 것을 들었어요.",
+                    "친구들의 조언을 듣고 마음을 바꾸기로 했어요."
+                ],
+                "illustration": f"학교 식당에서 친구들과 함께 점심을 먹고 있는 {name}. 식당에는 많은 학생들이 있고, 밝은 조명이 켜져 있어요. {name}은 작고 멀리서 보이는 모습으로, 식당의 활기찬 분위기가 느껴져요."
+            },
+            {
+                "title": "도전의 순간",
+                "paragraphs": [
+                    f"집에 돌아온 {name}는 엄마에게 말했어요.",
+                    f"'{topic}을 극복하고 싶어요!'라고 용감하게 말했어요.",
+                    "엄마는 {name}의 용기를 칭찬해주었어요."
+                ],
+                "illustration": f"집 거실에서 엄마와 이야기하고 있는 {name}. 거실에는 소파와 테이블이 있고, 따뜻한 조명이 켜져 있어요. {name}은 작고 멀리서 보이는 모습으로, 가정의 따뜻한 분위기가 느껴져요."
+            },
+            {
+                "title": "성공의 기쁨",
+                "paragraphs": [
+                    f"다음 날, {name}는 새로운 음식을 맛있게 먹었어요.",
+                    f"{topic}을 극복한 {name}는 정말 기뻤어요.",
+                    "엄마도 {name}의 성장을 자랑스러워했어요."
+                ],
+                "illustration": f"식탁에서 맛있게 식사하고 있는 {name}. 식탁에는 다양한 음식이 놓여 있고, 창문으로 밝은 햇살이 들어와요. {name}은 작고 멀리서 보이는 모습으로, 행복한 식사 시간의 분위기가 느껴져요."
+            },
+            {
+                "title": "새로운 시작",
+                "paragraphs": [
+                    f"이제 {name}는 {topic}에 대해 두려워하지 않아요.",
+                    "새로운 것에 도전하는 용기를 배웠어요.",
+                    "앞으로도 계속 성장해 나갈 거예요!"
+                ],
+                "illustration": f"공원에서 친구들과 함께 놀고 있는 {name}. 공원에는 나무와 꽃이 있고, 밝은 햇살이 비치고 있어요. {name}은 작고 멀리서 보이는 모습으로, 즐거운 놀이 시간의 분위기가 느껴져요."
+            }
+        ],
+        "ending": f"{name}는 {topic}을 극복하며 용기와 성장을 배웠어요. 앞으로도 새로운 도전을 두려워하지 않을 거예요!"
+    }
+    
+    logger.info(f"✅ 테스트용 동화 생성 완료: {test_story.get('title')}")
+    return test_story
+
 def generate_story_text(name, age, gender, topic):
     """훈육 동화봇을 사용한 스토리 생성"""
     logger.info(f"📝 스토리 생성 시작: {name}({age}세, {gender}) - {topic}")
@@ -184,14 +257,18 @@ def generate_story_text(name, age, gender, topic):
 """.strip()
 
     try:
+        # 비용 절약을 위한 모델 선택
+        model = "gpt-3.5-turbo" if USE_CHEAPER_MODEL else "gpt-4o"
+        max_tokens = 1000 if USE_CHEAPER_MODEL else 1500
+        
         res = client.chat.completions.create(
-            model="gpt-4o",
+            model=model,
             messages=[
                 {"role": "system", "content": "Respond only with valid JSON for a children's picture book."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.6,
-            max_tokens=1500,
+            max_tokens=max_tokens,
         )
 
         raw = res.choices[0].message.content.strip()
@@ -207,28 +284,39 @@ def generate_story_text(name, age, gender, topic):
             return result
     except Exception as e:
         logger.error(f"❌ 스토리 생성 오류: {e}")
+        # API 오류 시 테스트용 동화 사용
+        if "429" in str(e) or "quota" in str(e).lower():
+            logger.warning("⚠️ API 할당량 초과, 테스트용 동화 사용")
+            return generate_story_text_fallback(name, age, gender, topic)
         return {}
 
-def generate_story_with_images(name, age, gender, topic):
+def generate_story_with_images(name, age, gender, topic, generate_images=True):
     """스토리와 이미지를 함께 생성"""
     logger.info(f"🎨 스토리+이미지 생성 시작: {name}({age}세, {gender}) - {topic}")
     
     character = generate_character_profile(name, age, gender)
     story = generate_story_text(name, age, gender, topic)
     
-    # 각 챕터에 이미지 생성
-    chapters = story.get("chapters", [])
-    logger.info(f"📚 총 {len(chapters)}개 챕터에 이미지 생성 시작")
-    
-    for i, chapter in enumerate(chapters):
-        logger.info(f"🖼️ 챕터 {i+1} 이미지 생성 중...")
-        image_url = generate_image(chapter, character, i)
-        chapter["image_url"] = image_url
+    # 이미지 생성 여부 확인
+    if not generate_images or SKIP_IMAGES_BY_DEFAULT:
+        logger.info("💰 비용 절약을 위해 이미지 생성 건너뜀")
+        chapters = story.get("chapters", [])
+        for chapter in chapters:
+            chapter["image_url"] = None
+    else:
+        # 각 챕터에 이미지 생성
+        chapters = story.get("chapters", [])
+        logger.info(f"📚 총 {len(chapters)}개 챕터에 이미지 생성 시작")
         
-        if image_url:
-            logger.info(f"✅ 챕터 {i+1} 이미지 생성 완료")
-        else:
-            logger.warning(f"⚠️ 챕터 {i+1} 이미지 생성 실패")
+        for i, chapter in enumerate(chapters):
+            logger.info(f"🖼️ 챕터 {i+1} 이미지 생성 중...")
+            image_url = generate_image(chapter, character, i)
+            chapter["image_url"] = image_url
+            
+            if image_url:
+                logger.info(f"✅ 챕터 {i+1} 이미지 생성 완료")
+            else:
+                logger.warning(f"⚠️ 챕터 {i+1} 이미지 생성 실패")
     
     result = {
         "title": story.get("title"),
@@ -310,9 +398,10 @@ def generate_full():
         age = data.get("age", "").strip()
         gender = data.get("gender", "").strip()
         topic = data.get("topic", data.get("education_goal", "")).strip()
-        generate_images = data.get("generate_images", True)
+        generate_images = data.get("generate_images", True)  # 기본적으로 이미지 생성
+        use_fast_mode = data.get("fast_mode", True)  # 빠른 모드 옵션 추가
 
-        logger.info(f"📝 요청 데이터: {name}, {age}, {gender}, {topic}, 이미지생성: {generate_images}")
+        logger.info(f"📝 요청 데이터: {name}, {age}, {gender}, {topic}, 이미지생성: {generate_images}, 빠른모드: {use_fast_mode}")
 
         if not all([name, age, gender, topic]):
             logger.error("❌ 입력 데이터 누락")
@@ -320,9 +409,14 @@ def generate_full():
 
         logger.info("🎨 동화 생성 시작...")
         
+        # 빠른 모드 설정 적용 (저렴한 모델 사용하되 이미지는 유지)
+        if use_fast_mode:
+            global USE_CHEAPER_MODEL
+            USE_CHEAPER_MODEL = True
+        
         # 이미지 생성 여부에 따라 다른 함수 사용
         if generate_images:
-            result = generate_story_with_images(name, age, gender, topic)
+            result = generate_story_with_images(name, age, gender, topic, generate_images)
         else:
             character = generate_character_profile(name, age, gender)
             story = generate_story_text(name, age, gender, topic)
