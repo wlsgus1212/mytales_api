@@ -275,15 +275,34 @@ def generate_story_text(name, age, gender, topic):
 
         raw = res.choices[0].message.content.strip()
         cleaned = re.sub(r'```(?:json)?', '', raw).strip()
+        
+        logger.info(f"📝 원본 응답: {raw[:200]}...")
+        logger.info(f"🧹 정리된 응답: {cleaned[:200]}...")
+        
         try:
             result = json.loads(cleaned)
-            logger.info(f"✅ 스토리 생성 완료: {result.get('title', '제목 없음')}")
+            logger.info(f"✅ JSON 파싱 성공: {result.get('title', '제목 없음')}")
             return result
-        except:
-            m = re.search(r'(\{[\s\S]+\})', cleaned)
-            result = json.loads(m.group(1)) if m else {}
-            logger.warning("⚠️ JSON 파싱 재시도 성공")
-            return result
+        except json.JSONDecodeError as e:
+            logger.warning(f"⚠️ JSON 파싱 실패: {e}")
+            logger.info(f"🔍 문제 위치: {cleaned[max(0, e.pos-50):e.pos+50]}")
+            
+            # 더 강력한 JSON 추출 시도
+            try:
+                # JSON 부분만 추출
+                json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                    logger.info(f"🔧 JSON 부분 추출 시도: {json_str[:200]}...")
+                    result = json.loads(json_str)
+                    logger.info(f"✅ JSON 재파싱 성공: {result.get('title', '제목 없음')}")
+                    return result
+            except Exception as e2:
+                logger.error(f"❌ JSON 재파싱도 실패: {e2}")
+                
+            # 최후의 수단: 테스트용 동화 사용
+            logger.warning("⚠️ API 응답 파싱 실패, 테스트용 동화 사용")
+            return generate_story_text_fallback(name, age, gender, topic)
     except Exception as e:
         logger.error(f"❌ 스토리 생성 오류: {e}")
         # API 오류 시 테스트용 동화 사용
