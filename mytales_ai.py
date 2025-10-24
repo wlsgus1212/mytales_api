@@ -101,7 +101,6 @@ def generate_image(chapter_content, character_profile, chapter_index):
         response = client.images.generate(
             prompt=full_prompt,
             size=size,
-            quality="standard",
             n=1,
         )
         
