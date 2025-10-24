@@ -75,22 +75,45 @@ def generate_image(chapter_content, character_profile, chapter_index):
             story_text = " ".join(paragraphs)
             scene_description = f"{title}: {story_text[:100]}"
         
-        # 프롬프트 생성
+        # DALL-E 3용 프롬프트 생성 (더 상세하고 구체적으로)
         full_prompt = f"""
-        Children's book illustration for chapter {chapter_index + 1}: {scene_description}
+        A beautiful, high-quality children's book illustration for chapter {chapter_index + 1}: {scene_description}
 
-        Main character: {character_name}, {visual_desc}
+        CHARACTER DETAILS:
+        - Main character: {character_name}
+        - Character appearance: {visual_desc}
+        - Character must be clearly visible but not dominating the scene
 
-        Style: Wide-angle scene showing the story environment. Character should be small and distant in the scene, not a close-up portrait. Focus on the story setting, background, and situation. Consistent children's book illustration style. Warm, colorful, friendly art style. Soft lighting, bright colors, cute and adorable atmosphere. Perfect for ages 5-9.
+        SCENE REQUIREMENTS:
+        - Show the specific story situation described: {scene_description}
+        - Include all relevant story elements and objects mentioned
+        - Create a warm, inviting atmosphere suitable for children ages 5-9
+        - Use bright, cheerful colors with soft lighting
+        - Include detailed background elements that support the story
+
+        ARTISTIC STYLE:
+        - High-quality children's book illustration style
+        - Clean, detailed artwork with clear composition
+        - Professional digital art quality
+        - Warm and friendly color palette
+        - Soft shadows and gentle lighting
+        - Character should be medium-sized in the scene, not tiny or huge
+
+        COMPOSITION:
+        - Wide-angle view showing the story environment
+        - Character positioned naturally within the scene
+        - Background elements that enhance the story context
+        - Balanced composition with clear focal points
+        - Professional book illustration quality
+
+        The illustration must accurately reflect the story content and create an engaging visual narrative that complements the text.
         """.strip()
         
         logger.info(f"🖼️ 이미지 생성 시작 (챕터 {chapter_index + 1}): {title}")
 
         response = client.images.generate(
-            model="dall-e-3",
             prompt=full_prompt,
             size="1024x1024",
-            quality="standard",
             n=1
         )
         
@@ -122,28 +145,48 @@ def generate_story_text(name, age, gender, topic):
         raise Exception(f"API 연결 실패: {api_error}")
     
     prompt = f"""
-당신은 "훈육 동화봇"입니다. 5~9세 아동을 위한 훈육 중심의 동화를 제작하는 데 최적화되어 있습니다.
+당신은 "교훈 중심 훈육 동화봇"입니다. 5~9세 아동을 위한 가치관과 교훈을 통해 근본적인 변화를 이끌어내는 동화를 제작하는 데 최적화되어 있습니다.
 
 ## 🎯 목적
-사용자가 입력한 정보를 기반으로, 5~9세 어린이가 공감하고 이해할 수 있는 짧고 따뜻한 동화를 생성합니다.
+사용자가 입력한 훈육 주제를 통해 아이들이 근본적으로 바뀌도록, 교훈과 가치관을 자연스럽게 전달하는 동화를 생성합니다. 단순한 문제 해결이 아닌, 내면의 성장과 변화를 이끌어냅니다.
 
-## 📘 동화 구조
-1. **도입** – 주인공 소개 및 상황 설명
-2. **갈등** – 훈육 주제에 해당하는 문제 발생  
-3. **도움** – 친구, 부모, 마법사 등 조력자 등장
-4. **해결** – 주인공이 스스로 또는 도움을 받아 문제를 해결
-5. **마무리** – 감정을 표현하고 교훈을 자연스럽게 전달
+## 🌟 교훈 중심 접근법
+- **가치관 전달**: 올바른 가치관과 태도를 자연스럽게 전달
+- **감정적 공감**: 아이들이 공감할 수 있는 감정적 경험 제공
+- **성장의 과정**: 문제 해결 과정에서의 내면적 성장 강조
+- **의미 있는 교훈**: 단순한 해결책이 아닌 깊이 있는 교훈 전달
+
+## 📘 동화 구조 (교훈 중심)
+1. **도입** – 주인공의 현재 상태와 내면의 갈등 소개
+2. **갈등과 깨달음** – 문제 상황을 통해 주인공이 깨닫는 과정
+3. **교훈과 가치관** – 올바른 가치관과 태도를 배우는 과정
+4. **내면의 변화** – 주인공의 마음과 태도가 근본적으로 바뀌는 과정
+5. **성장과 희망** – 새로운 가치관으로 더 나은 미래를 향하는 희망적 마무리
 
 ## 🎨 시각적 요소
 각 챕터마다 구체적인 삽화 설명을 포함하세요:
-- 배경과 환경을 자세히 설명 (방, 공원, 학교, 집 등)
-- 캐릭터의 행동과 감정 상태
-- 따뜻하고 귀여운 분위기
+- 주인공의 감정과 내면 상태를 보여주는 배경
+- 교훈과 가치관을 상징하는 요소들
+- 성장과 변화를 나타내는 시각적 요소
+- 따뜻하고 감동적인 분위기
 
 ## ⚠️ 중요 지시사항
 - 주인공 {name}은 모든 챕터에서 동일한 외모와 성격을 유지해야 합니다
 - 각 챕터는 이전 챕터와 자연스럽게 연결되어야 합니다
 - 삽화 설명은 해당 챕터의 핵심 장면을 정확히 반영해야 합니다
+- 교훈과 가치관은 훈육 주제와 자연스럽게 연결되어야 합니다
+
+## 🌟 훈육 주제별 교훈 중심 접근법
+- **편식**: "다양한 음식의 소중함과 건강한 몸의 중요성"을 깨닫는 과정
+- **정리정돈**: "정리된 공간의 편안함과 질서의 가치"를 이해하는 과정
+- **예의**: "예의바른 태도가 주는 따뜻함과 소중함"을 경험하는 과정
+- **용기**: "용기를 내면 얻을 수 있는 새로운 경험과 성장"을 깨닫는 과정
+
+## 💡 교훈 전달 방법
+- **직접적 설교 금지**: "해야 한다"는 식의 직접적 지시 금지
+- **경험을 통한 깨달음**: 주인공이 직접 경험하며 깨닫는 과정 강조
+- **감정적 공감**: 아이들이 공감할 수 있는 감정적 경험 제공
+- **자연스러운 교훈**: 이야기 속에서 자연스럽게 교훈이 전달되도록
 
 반드시 아래 JSON 형식만 응답하세요:
 
@@ -154,18 +197,19 @@ def generate_story_text(name, age, gender, topic):
     {{
       "title": "챕터 제목",
       "paragraphs": ["문장1", "문장2", "문장3"],
-      "illustration": "매우 구체적인 삽화 설명"
+      "illustration": "매우 구체적인 삽화 설명 (교훈과 가치관을 상징하는 요소 포함)"
     }}
   ],
-  "ending": "마무리 메시지"
+  "ending": "마무리 메시지 (교훈과 희망적 메시지 포함)"
 }}
 
 요구사항:
 - 이름: {name}, 나이: {age}, 성별: {gender}, 훈육주제: {topic}
 - 총 5개 챕터로 구성
 - 각 챕터는 "paragraphs" 리스트 형태로 2~4문장 나눠서 작성
-- "illustration" 필드는 해당 챕터의 핵심 장면을 매우 구체적으로 설명
+- "illustration" 필드는 해당 챕터의 핵심 장면을 매우 구체적으로 설명 (교훈과 가치관을 상징하는 요소 포함)
 - 친근하고 따뜻한 말투, 짧고 간결한 문장 사용
+- 교훈과 가치관을 자연스럽게 전달하는 스토리 구성
 - 반드시 위 JSON 구조만 반환. 다른 텍스트나 설명 포함 금지.
 """.strip()
 
@@ -177,10 +221,10 @@ def generate_story_text(name, age, gender, topic):
         res = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "Respond only with valid JSON for a children's picture book."},
+                {"role": "system", "content": "Respond only with valid JSON for a children's picture book with meaningful lessons."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.6,
+            temperature=0.6,  # 교훈 전달을 위해 적절한 창의성
             max_tokens=max_tokens,
         )
 
