@@ -10,7 +10,11 @@ load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
     raise RuntimeError("OPENAI_API_KEY not set in .env")
-client = OpenAI(api_key=API_KEY)
+
+# OpenAI 클라이언트(타임아웃/재시도)
+OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "120"))     # 초
+OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
+client = OpenAI(api_key=API_KEY, timeout=OPENAI_TIMEOUT, max_retries=OPENAI_MAX_RETRIES)
 
 # SDK 최소 버전 확인
 def _ver_tuple(v):
@@ -30,6 +34,7 @@ logger = logging.getLogger("mytales")
 USE_CHEAPER_MODEL = False        # 품질 우선
 SKIP_IMAGES_BY_DEFAULT = False
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
+IMAGE_LIMIT_DEFAULT = int(os.getenv("IMAGE_LIMIT_DEFAULT", "2"))  # 프리뷰 기본 2장
 
 # 지원 해상도 고정
 SUPPORTED_IMG_SIZES = {"1024x1024", "1536x1024", "1024x1536", "auto"}
@@ -216,10 +221,12 @@ def generate_image(chapter_content, character_profile, chapter_index):
         return None
 
 # ───────── 파이프라인 ─────────
-def generate_story_with_images(name, age, gender, topic, generate_images=True):
+def generate_story_with_images(name, age, gender, topic, generate_images=True, image_limit=IMAGE_LIMIT_DEFAULT):
     story, profile = generate_story_text(name, age, gender, topic)
     if generate_images and not SKIP_IMAGES_BY_DEFAULT:
         for i, ch in enumerate(story.get("chapters", [])):
+            if i >= image_limit:
+                break
             url = generate_image(ch, profile, i)
             if url:
                 ch["image_url"] = url
@@ -296,6 +303,7 @@ def generate_full():
         topic = (data.get("topic") or data.get("education_goal") or "").strip()
         generate_images = bool(data.get("generate_images", True))
         use_fast_mode = bool(data.get("fast_mode", False))
+        image_limit = int(data.get("image_limit", IMAGE_LIMIT_DEFAULT))
 
         if not all([name, age, gender, topic]):
             return jsonify({"error": "입력 누락"}), 400
@@ -304,7 +312,7 @@ def generate_full():
         USE_CHEAPER_MODEL = use_fast_mode
 
         if generate_images:
-            result = generate_story_with_images(name, age, gender, topic, True)
+            result = generate_story_with_images(name, age, gender, topic, True, image_limit=image_limit)
         else:
             story, profile = generate_story_text(name, age, gender, topic)
             result = {
@@ -366,11 +374,16 @@ def diag():
         "image_size": IMAGE_SIZE,
         "valid_size_used": _valid_image_size(IMAGE_SIZE),
         "supported_sizes": sorted(list(SUPPORTED_IMG_SIZES)),
-        "cheap_mode": USE_CHEAPER_MODEL
+        "cheap_mode": USE_CHEAPER_MODEL,
+        "openai_timeout": OPENAI_TIMEOUT,
+        "openai_max_retries": OPENAI_MAX_RETRIES,
+        "image_limit_default": IMAGE_LIMIT_DEFAULT
     })
 
 if __name__ == "__main__":
     logger.info("🚀 MyTales AI 서버 시작")
     logger.info(f"💰 저렴한 모델 사용: {USE_CHEAPER_MODEL}")
     logger.info(f"🖼️ 이미지 모델: {IMAGE_MODEL}, 크기: {IMAGE_SIZE}")
+    logger.info(f"⏱️ OpenAI timeout: {OPENAI_TIMEOUT}s, retries: {OPENAI_MAX_RETRIES}")
+    logger.info(f"🖼️ Preview image_limit default: {IMAGE_LIMIT_DEFAULT}")
     app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
