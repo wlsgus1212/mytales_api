@@ -7,15 +7,17 @@ from openai import OpenAI, __version__ as openai_version
 
 # ───────── 환경 ─────────
 load_dotenv()
-API_KEY = os.getenv("OPENAI_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
     raise RuntimeError("OPENAI_API_KEY not set in .env")
 client = OpenAI(api_key=API_KEY)
 
 # SDK 최소 버전 확인
-def _ver_tuple(v): 
-    try: return tuple(map(int, v.split(".")[:2]))
-    except: return (0,0)
+def _ver_tuple(v):
+    try:
+        return tuple(map(int, v.split(".")[:2]))
+    except:
+        return (0, 0)
 if _ver_tuple(openai_version) < (1, 52):
     raise RuntimeError(f"openai SDK too old: {openai_version}. Upgrade to >=1.52.0")
 
@@ -28,7 +30,15 @@ logger = logging.getLogger("mytales")
 USE_CHEAPER_MODEL = False        # 품질 우선
 SKIP_IMAGES_BY_DEFAULT = False
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
-IMAGE_SIZE  = os.getenv("IMAGE_SIZE",  "1792x1024")  # Wix 가로형
+
+# 지원 해상도 고정
+SUPPORTED_IMG_SIZES = {"1024x1024", "1536x1024", "1024x1536", "auto"}
+IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1536x1024")  # 가로형 기본
+def _valid_image_size(s: str) -> str:
+    if s in SUPPORTED_IMG_SIZES:
+        return s
+    logging.warning(f"[image] invalid size '{s}', fallback to 1536x1024")
+    return "1536x1024"
 
 def pick_model():
     return "gpt-4o-mini" if USE_CHEAPER_MODEL else "gpt-4o"
@@ -127,7 +137,6 @@ def generate_story_text(name, age, gender, topic):
         "Return ONLY strict JSON that exactly matches the schema. "
         "No extra text. Korean output."
     )
-
     model = pick_model()
 
     for attempt in range(2):
@@ -192,12 +201,13 @@ Strict negatives:
 
 def generate_image(chapter_content, character_profile, chapter_index):
     try:
+        size = _valid_image_size(IMAGE_SIZE)
         prompt = build_image_prompt(chapter_content, character_profile, chapter_index)
-        logger.info(f"🖼️ 이미지 생성: 챕터 {chapter_index+1} | model={IMAGE_MODEL} size={IMAGE_SIZE}")
+        logger.info(f"🖼️ 이미지 생성: 챕터 {chapter_index+1} | model={IMAGE_MODEL} size={size}")
         img = client.images.generate(
             model=IMAGE_MODEL,
             prompt=prompt,
-            size=IMAGE_SIZE,
+            size=size,
             n=1
         )
         return img.data[0].url
@@ -319,7 +329,7 @@ def generate_full():
         er.headers.add("Access-Control-Allow-Credentials", "true")
         return er, 500
 
-@app.route("/health", methods=["GET", 'OPTIONS'])
+@app.route("/health", methods=["GET", "OPTIONS"])
 def health_check():
     if request.method == "OPTIONS":
         r = jsonify({"status": "ok"})
@@ -354,6 +364,8 @@ def diag():
         "openai_version": openai_version,
         "image_model": IMAGE_MODEL,
         "image_size": IMAGE_SIZE,
+        "valid_size_used": _valid_image_size(IMAGE_SIZE),
+        "supported_sizes": sorted(list(SUPPORTED_IMG_SIZES)),
         "cheap_mode": USE_CHEAPER_MODEL
     })
 
