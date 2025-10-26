@@ -1,336 +1,234 @@
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
-import openai
-import os
-import json
-import re
-import time
-import logging
+import os, json, re, time, logging, random
 from dotenv import load_dotenv
 
-# 환경변수 로드
+# ─────────────────────────────
+# 환경
+# ─────────────────────────────
 load_dotenv()
+from openai import OpenAI
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Flask 앱 초기화
 app = Flask(__name__)
 CORS(app)
 
-# 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# OpenAI 클라이언트 초기화
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ─────────────────────────────
+# 전역 옵션
+# ─────────────────────────────
+USE_CHEAPER_MODEL = False   # True: 저렴/빠름, False: 고품질
+SKIP_IMAGES_BY_DEFAULT = False
 
-# 전역 설정
-USE_CHEAPER_MODEL = True  # 비용 절약을 위한 저렴한 모델 사용
-SKIP_IMAGES_BY_DEFAULT = False  # 기본적으로 이미지 생성
+# 모델 선택
+def pick_model():
+    return "gpt-4o-mini" if USE_CHEAPER_MODEL else "o4-mini"
 
-# ───── 캐릭터 프로필 생성 ─────
+# ─────────────────────────────
+# 유틸
+# ─────────────────────────────
+def clean_json_blocks(s: str) -> str:
+    s = re.sub(r"```(?:json)?", "", s).strip()
+    s = s.strip("` \n\t")
+    return s
+
+def try_json_load(s: str):
+    try:
+        return json.loads(s)
+    except:
+        m = re.search(r"\{.*\}\s*$", s, re.DOTALL)
+        if m:
+            return json.loads(m.group(0))
+        raise
+
+def clamp_age(age):
+    try:
+        n = int(age)
+        return max(3, min(10, n))
+    except:
+        return 6
+
+# ─────────────────────────────
+# 캐릭터 프로필
+# ─────────────────────────────
 def generate_character_profile(name, age, gender):
-    """캐릭터의 시각적 프로필 생성"""
-    logger.info(f"👶 캐릭터 프로필 생성: {name} - {age}세 {gender}")
-    
-    # 다양한 헤어스타일과 옷 스타일
+    age = clamp_age(age)
     hair_styles = [
-        "짧은 갈색 곱슬머리", "긴 검은 머리", "웨이브 밤색 머리", 
-        "짧은 금발 머리", "포니테일 머리", "보브 스타일 머리"
+        "짧은 갈색 곱슬머리", "긴 검은 생머리", "웨이브 밤색 머리",
+        "짧은 금발 머리", "포니테일 머리", "보브 컷"
     ]
     outfits = [
-        "노란 셔츠와 파란 멜빵", "분홍 스웨터와 청바지", "하늘색 드레스",
-        "빨간 후드티와 검은 바지", "초록 체크 셔츠와 카키 바지", "보라색 원피스"
+        "노란 셔츠+파란 멜빵", "분홍 스웨터+청바지", "하늘색 원피스",
+        "빨간 후드+검은 바지", "초록 체크 셔츠+카키 바지", "보라색 원피스"
     ]
-    
-    import random
-    hair_style = random.choice(hair_styles)
+    hair = random.choice(hair_styles)
     outfit = random.choice(outfits)
-    
-    character_profile = {
+
+    # 일관성 앵커 토큰
+    anchor = f"<<{name}-{age}-{gender}>>"
+
+    canonical_ko = f"{hair}, {outfit} 착용. 둥근 얼굴, 부드러운 볼, 따뜻한 갈색 아몬드형 눈. 아이 체형. 친근하고 사랑스러운 인상. 모든 장면에서 동일한 외형 유지."
+    canonical_en = (f"{anchor} is a {age}-year-old {gender} child. {hair}. Wearing {outfit}. "
+                    "Round face with soft cheeks, warm brown almond eyes, childlike proportions. "
+                    "The exact same character must appear consistently in every scene with identical appearance.")
+
+    profile = {
         "name": name,
         "age": age,
         "gender": gender,
-        "visual_description": f"{hair_style}, 착용: {outfit}",
-        "canonical": f"{name} is a {age}-year-old {gender} child with {hair_style}, wearing {outfit}. Round face with soft cheeks, warm brown almond eyes, childlike proportions, friendly and cute appearance. This exact same character must appear consistently in every scene with identical appearance."
+        "anchor": anchor,
+        "visual_description": canonical_ko,
+        "canonical": canonical_en
     }
-    
-    logger.info(f"✅ 캐릭터 프로필 생성 완료: {name} - {hair_style}, 착용: {outfit}")
-    return character_profile
+    logger.info(f"✅ 캐릭터 프로필: {profile}")
+    return profile
 
-# ───── 이미지 생성 (DALL-E 3 사용) ─────
-def generate_image(chapter_content, character_profile, chapter_index):
-    """DALL-E 3를 사용한 이미지 생성"""
-    try:
-        character_name = character_profile["name"]
-        visual_desc = character_profile["canonical"]
-        
-        # 챕터 정보 추출
-        title = chapter_content.get("title", f"챕터 {chapter_index + 1}")
-        paragraphs = chapter_content.get("paragraphs", [])
-        illustration = chapter_content.get("illustration", "")
-        
-        # 장면 설명 생성
-        if illustration:
-            scene_description = illustration
-        else:
-            story_text = " ".join(paragraphs)
-            scene_description = f"{title}: {story_text[:100]}"
-        
-        # DALL-E 3용 프롬프트 생성 (1000자 제한에 맞춰 간소화)
-        full_prompt = f"""Children's book illustration for chapter {chapter_index + 1}: {scene_description}
+# ─────────────────────────────
+# 스토리 생성
+# ─────────────────────────────
+def story_prompt(name, age, gender, topic, anchor, lang="ko"):
+    return f"""
+당신은 5~9세 아동용 감성 그림책 작가 겸 편집자다.
+목표: 아이가 스스로 깨닫는 교훈을 자연스럽게 체화하게 만든다. 설교 금지. 경험 통한 깨달음.
 
-Main character: {character_name}, {visual_desc}
+출력언어: 한국어.
+주요 정보: 이름={name}, 나이={age}, 성별={gender}, 훈육주제='{topic}', 캐릭터앵커='{anchor}'.
 
-Style: High-quality children's book illustration. Wide-angle scene showing story environment. Character medium-sized, not dominating. Warm colors, soft lighting, friendly atmosphere for ages 5-9. Professional digital art quality with clear composition.
+작성 규칙:
+- 총 5개 챕터. 각 챕터 paragraphs 2~4문장. 짧고 리듬감 있게.
+- 도입→갈등→깨달음→변화→희망의 구조.
+- {name}의 성격과 감정을 장면으로 보여주기. '느꼈다'보다 '보여주기'.
+- 설교형 문장 금지. 대사와 행동으로 전달.
+- 각 챕터에 일러스트 설명 'illustration' 필수: 장면, 구도(카메라), 배경, 소품, 빛, 색감, 상징, {anchor} 외형 유지 지시 포함.
 
-The illustration must accurately reflect the story content: {scene_description}""".strip()
-        
-        logger.info(f"🖼️ 이미지 생성 시작 (챕터 {chapter_index + 1}): {title}")
-
-        response = client.images.generate(
-            prompt=full_prompt,
-            size="1024x1024",
-            n=1
-        )
-        
-        image_url = response.data[0].url
-        logger.info(f"✅ 이미지 생성 완료 (챕터 {chapter_index + 1})")
-        return image_url
-    except Exception as e:
-        logger.error(f"❌ 이미지 생성 오류 (챕터 {chapter_index + 1}): {e}")
-        if "429" in str(e) or "quota" in str(e).lower():
-            logger.warning(f"⚠️ DALL·E 3 할당량 초과, 챕터 {chapter_index + 1} 이미지 생략")
-        return None
-
-# ───── 스토리 생성 ─────
-def generate_story_text(name, age, gender, topic):
-    """훈육 동화봇을 사용한 스토리 생성"""
-    logger.info(f"📝 스토리 생성 시작: {name}({age}세, {gender}) - {topic}")
-    
-    # API 연결 테스트
-    try:
-        # 간단한 API 연결 테스트
-        test_response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": "test"}],
-            max_tokens=5
-        )
-        logger.info("✅ API 연결 정상")
-    except Exception as api_error:
-        logger.error(f"❌ API 연결 실패: {api_error}")
-        raise Exception(f"API 연결 실패: {api_error}")
-    
-    prompt = f"""
-당신은 "교훈 중심 훈육 동화봇"입니다. 5~9세 아동을 위한 가치관과 교훈을 통해 근본적인 변화를 이끌어내는 동화를 제작하는 데 최적화되어 있습니다.
-
-## 🎯 목적
-사용자가 입력한 훈육 주제를 통해 아이들이 근본적으로 바뀌도록, 교훈과 가치관을 자연스럽게 전달하는 동화를 생성합니다. 단순한 문제 해결이 아닌, 내면의 성장과 변화를 이끌어냅니다.
-
-## 🌟 교훈 중심 접근법
-- **가치관 전달**: 올바른 가치관과 태도를 자연스럽게 전달
-- **감정적 공감**: 아이들이 공감할 수 있는 감정적 경험 제공
-- **성장의 과정**: 문제 해결 과정에서의 내면적 성장 강조
-- **의미 있는 교훈**: 단순한 해결책이 아닌 깊이 있는 교훈 전달
-
-## 📘 동화 구조 (교훈 중심)
-1. **도입** – 주인공의 현재 상태와 내면의 갈등 소개
-2. **갈등과 깨달음** – 문제 상황을 통해 주인공이 깨닫는 과정
-3. **교훈과 가치관** – 올바른 가치관과 태도를 배우는 과정
-4. **내면의 변화** – 주인공의 마음과 태도가 근본적으로 바뀌는 과정
-5. **성장과 희망** – 새로운 가치관으로 더 나은 미래를 향하는 희망적 마무리
-
-## 🎨 시각적 요소
-각 챕터마다 구체적인 삽화 설명을 포함하세요:
-- 주인공의 감정과 내면 상태를 보여주는 배경
-- 교훈과 가치관을 상징하는 요소들
-- 성장과 변화를 나타내는 시각적 요소
-- 따뜻하고 감동적인 분위기
-
-## ⚠️ 중요 지시사항
-- 주인공 {name}은 모든 챕터에서 동일한 외모와 성격을 유지해야 합니다
-- 각 챕터는 이전 챕터와 자연스럽게 연결되어야 합니다
-- 삽화 설명은 해당 챕터의 핵심 장면을 정확히 반영해야 합니다
-- 교훈과 가치관은 훈육 주제와 자연스럽게 연결되어야 합니다
-
-## 🌟 훈육 주제별 교훈 중심 접근법
-- **편식**: "다양한 음식의 소중함과 건강한 몸의 중요성"을 깨닫는 과정
-- **정리정돈**: "정리된 공간의 편안함과 질서의 가치"를 이해하는 과정
-- **예의**: "예의바른 태도가 주는 따뜻함과 소중함"을 경험하는 과정
-- **용기**: "용기를 내면 얻을 수 있는 새로운 경험과 성장"을 깨닫는 과정
-
-## 💡 교훈 전달 방법
-- **직접적 설교 금지**: "해야 한다"는 식의 직접적 지시 금지
-- **경험을 통한 깨달음**: 주인공이 직접 경험하며 깨닫는 과정 강조
-- **감정적 공감**: 아이들이 공감할 수 있는 감정적 경험 제공
-- **자연스러운 교훈**: 이야기 속에서 자연스럽게 교훈이 전달되도록
-
-반드시 아래 JSON 형식만 응답하세요:
-
+반드시 아래 JSON만 반환:
 {{
-  "title": "동화 제목",
-  "character": "주인공 {name} 소개",
+  "title": "짧고 상징적인 제목",
+  "character": "주인공 {name}의 한 줄 소개",
   "chapters": [
     {{
       "title": "챕터 제목",
-      "paragraphs": ["문장1", "문장2", "문장3"],
-      "illustration": "매우 구체적인 삽화 설명 (교훈과 가치관을 상징하는 요소 포함)"
+      "paragraphs": ["문장1", "문장2"],
+      "illustration": "구체적 장면/구도/색/상징/감정/환경. '{anchor}' 외형 동일 지시 포함"
     }}
   ],
-  "ending": "마무리 메시지 (교훈과 희망적 메시지 포함)"
+  "ending": "따뜻한 마무리 한 단락"
 }}
-
-요구사항:
-- 이름: {name}, 나이: {age}, 성별: {gender}, 훈육주제: {topic}
-- 총 5개 챕터로 구성
-- 각 챕터는 "paragraphs" 리스트 형태로 2~4문장 나눠서 작성
-- "illustration" 필드는 해당 챕터의 핵심 장면을 매우 구체적으로 설명 (교훈과 가치관을 상징하는 요소 포함)
-- 친근하고 따뜻한 말투, 짧고 간결한 문장 사용
-- 교훈과 가치관을 자연스럽게 전달하는 스토리 구성
-- 반드시 위 JSON 구조만 반환. 다른 텍스트나 설명 포함 금지.
 """.strip()
 
-    try:
-        # 비용 절약을 위한 모델 선택
-        model = "gpt-3.5-turbo" if USE_CHEAPER_MODEL else "gpt-4o"
-        max_tokens = 1000 if USE_CHEAPER_MODEL else 1500
-        
-        res = client.chat.completions.create(
+def generate_story_text(name, age, gender, topic):
+    logger.info(f"📝 스토리 생성: {name}/{age}/{gender}/{topic}")
+    model = pick_model()
+    prompt = story_prompt(name, clamp_age(age), gender, topic, anchor=generate_character_profile(name, age, gender)["anchor"])
+
+    # system 메시지로 JSON 강제
+    sys = (
+        "You are a senior children's picture-book writer. "
+        "Return only strict JSON that conforms exactly to the user's schema. "
+        "No markdown fences. Korean output."
+    )
+
+    # 1회 시도 후 보정 1회
+    for attempt in range(2):
+        resp = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "Respond only with valid JSON for a children's picture book with meaningful lessons."},
+                {"role": "system", "content": sys},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.6,  # 교훈 전달을 위해 적절한 창의성
-            max_tokens=max_tokens,
+            temperature=0.4,   # 일관성↑
+            max_tokens=1400,
+            response_format={"type": "json_object"}
         )
-
-        raw = res.choices[0].message.content.strip()
-        cleaned = re.sub(r'```(?:json)?', '', raw).strip()
-        
+        raw = clean_json_blocks(resp.choices[0].message.content)
         try:
-            result = json.loads(cleaned)
-            logger.info(f"✅ JSON 파싱 성공: {result.get('title', '제목 없음')}")
-            return result
-        except json.JSONDecodeError as e:
-            logger.warning(f"⚠️ JSON 파싱 실패: {e}")
-            logger.info(f"🔍 문제 위치: {cleaned[max(0, e.pos-50):e.pos+50]}")
-            
-            # 더 강력한 JSON 추출 시도
-            try:
-                # JSON 부분만 추출
-                json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(0)
-                    logger.info(f"🔧 JSON 부분 추출 시도: {json_str[:200]}...")
-                    
-                    # JSON 문자열 정리
-                    json_str = json_str.replace('\n', ' ').replace('\r', ' ')
-                    json_str = re.sub(r'\s+', ' ', json_str)  # 여러 공백을 하나로
-                    
-                    result = json.loads(json_str)
-                    logger.info(f"✅ JSON 재파싱 성공: {result.get('title', '제목 없음')}")
-                    return result
-            except Exception as e2:
-                logger.error(f"❌ JSON 재파싱도 실패: {e2}")
-            
-            # 마지막 시도: 수동으로 JSON 구조 생성
-            try:
-                logger.warning("⚠️ 수동 JSON 구조 생성 시도")
-                fallback_result = {
-                    "title": f"{name}의 {topic} 이야기",
-                    "character": f"{name}는 {age}세 {gender} 아이입니다",
-                    "chapters": [
-                        {
-                            "title": "도입",
-                            "paragraphs": [
-                                f"{name}는 {topic}에 대해 고민이 있었어요.",
-                                "하지만 새로운 마음으로 도전해보기로 했어요.",
-                                "그렇게 {name}의 여행이 시작되었어요."
-                            ],
-                            "illustration": f"{name}가 고민하는 모습을 보여주는 장면"
-                        },
-                        {
-                            "title": "갈등과 깨달음",
-                            "paragraphs": [
-                                f"{name}는 {topic} 때문에 어려움을 겪었어요.",
-                                "하지만 주변 사람들의 도움을 받았어요.",
-                                "그때 {name}는 중요한 것을 깨달았어요."
-                            ],
-                            "illustration": f"{name}가 깨달음을 얻는 순간"
-                        },
-                        {
-                            "title": "교훈과 가치관",
-                            "paragraphs": [
-                                f"{name}는 올바른 가치관을 배웠어요.",
-                                "이제 {topic}에 대해 다른 생각을 하게 되었어요.",
-                                "마음이 한결 가벼워졌어요."
-                            ],
-                            "illustration": f"{name}가 새로운 가치관을 배우는 모습"
-                        },
-                        {
-                            "title": "내면의 변화",
-                            "paragraphs": [
-                                f"{name}의 마음이 근본적으로 바뀌었어요.",
-                                "이제 {topic}에 대해 긍정적으로 생각해요.",
-                                "자신감이 생겼어요."
-                            ],
-                            "illustration": f"{name}가 자신감을 얻는 모습"
-                        },
-                        {
-                            "title": "성장과 희망",
-                            "paragraphs": [
-                                f"{name}는 더욱 성장했어요.",
-                                "새로운 도전을 두려워하지 않아요.",
-                                "앞으로도 계속 성장할 거예요!"
-                            ],
-                            "illustration": f"{name}가 미래를 향해 나아가는 모습"
-                        }
-                    ],
-                    "ending": f"{name}는 {topic}을 통해 소중한 교훈을 배웠어요. 앞으로도 계속 성장해 나갈 거예요!"
-                }
-                logger.info(f"✅ 수동 JSON 생성 성공: {fallback_result.get('title')}")
-                return fallback_result
-            except Exception as e3:
-                logger.error(f"❌ 수동 JSON 생성도 실패: {e3}")
-            
-            raise Exception("API 응답 파싱 실패")
-            
-    except Exception as e:
-        logger.error(f"❌ 스토리 생성 오류: {e}")
-        raise Exception(f"스토리 생성 실패: {e}")
+            data = try_json_load(raw)
+            # 간단 유효성 체크
+            assert "chapters" in data and len(data["chapters"]) == 5
+            for ch in data["chapters"]:
+                assert "paragraphs" in ch and 2 <= len(ch["paragraphs"]) <= 4
+                assert "illustration" in ch and len(ch["illustration"]) >= 30
+            return data
+        except Exception as e:
+            logger.warning(f"JSON 보정 재시도 {attempt+1}: {e}")
+            prompt += "\n\n주의: 스키마 불일치. 정확히 5개 챕터, 각 2~4문장, illustration 자세히."
 
+    raise RuntimeError("스토리 JSON 생성 실패")
+
+# ─────────────────────────────
+# 이미지 생성
+# ─────────────────────────────
+def build_image_prompt(chapter_content, character_profile, chapter_index):
+    title = chapter_content.get("title", f"챕터 {chapter_index+1}")
+    illu = chapter_content.get("illustration", "")
+    anchor = character_profile["anchor"]
+    canonical = character_profile["canonical"]
+
+    # 일관성 강제용 템플릿
+    prompt = f"""
+Children's picture book illustration, chapter {chapter_index+1}: "{title}"
+
+Story beat:
+{illu}
+
+Main character:
+{canonical}
+Always include the hidden anchor token {anchor} in description for consistency.
+
+Art direction:
+- Wide composition that shows environment and context
+- Character medium size, readable expression
+- Soft lighting, warm palette, gentle textures, ages 5–9 friendly
+- Clean silhouette, simple background clutter, clear focal point
+- Subtle symbolic elements that reflect the moral theme
+- Cohesive style across all scenes, same character appearance
+
+Output: a single coherent illustration for the scene. No text, no collage, no split panels.
+""".strip()
+    return prompt
+
+def generate_image(chapter_content, character_profile, chapter_index):
+    try:
+        prompt = build_image_prompt(chapter_content, character_profile, chapter_index)
+        logger.info(f"🖼️ 이미지 생성: 챕터 {chapter_index+1}")
+        img = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1024x1024",
+            n=1
+        )
+        return img.data[0].url
+    except Exception as e:
+        logger.error(f"이미지 생성 실패 {chapter_index+1}: {e}")
+        return None
+
+# ─────────────────────────────
+# 스토리+이미지 파이프라인
+# ─────────────────────────────
 def generate_story_with_images(name, age, gender, topic, generate_images=True):
-    """스토리와 이미지를 함께 생성"""
-    logger.info(f"🎨 스토리+이미지 생성 시작: {name}({age}세, {gender}) - {topic}")
-    
-    # 캐릭터 프로필 생성
+    # 캐릭터 먼저 확정
     character_profile = generate_character_profile(name, age, gender)
-    
-    # 스토리 생성
     story = generate_story_text(name, age, gender, topic)
-    
-    # 이미지 생성
+
+    # 이미지
     if generate_images and not SKIP_IMAGES_BY_DEFAULT:
-        logger.info(f"📚 총 {len(story.get('chapters', []))}개 챕터에 이미지 생성 시작")
-        for i, chapter in enumerate(story.get('chapters', [])):
-            logger.info(f"🖼️ 챕터 {i+1} 이미지 생성 중...")
-            image_url = generate_image(chapter, character_profile, i)
-            if image_url:
-                chapter['image_url'] = image_url
-            else:
-                logger.warning(f"⚠️ 챕터 {i+1} 이미지 생성 실패")
-    
-    # 결과 조합
-    result = {
+        for i, ch in enumerate(story.get("chapters", [])):
+            url = generate_image(ch, character_profile, i)
+            if url:
+                ch["image_url"] = url
+
+    return {
         "title": story.get("title"),
         "character_profile": character_profile,
         "chapters": story.get("chapters", []),
         "ending": story.get("ending", "")
     }
-    
-    logger.info(f"🎉 전체 동화+이미지 생성 완료: {result.get('title')}")
-    return result
 
-# ───── HTML 템플릿 라우트 ─────
+# ─────────────────────────────
+# 템플릿 라우트
+# ─────────────────────────────
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -379,115 +277,85 @@ def thank_you():
 def admin():
     return render_template("admin.html")
 
-# ───── API 엔드포인트 ─────
+# ─────────────────────────────
+# API
+# ─────────────────────────────
 @app.route("/generate-full", methods=["POST", "OPTIONS"])
 def generate_full():
-    """Wix에서 호출하는 메인 API 엔드포인트"""
-    
-    # CORS preflight 요청 처리
     if request.method == "OPTIONS":
-        response = jsonify({"status": "ok"})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
-        return response
-    
-    try:
-        logger.info("🚀 /generate-full 요청 시작")
-        
-        data = request.get_json(force=True)
-        name = data.get("name", "").strip()
-        age = data.get("age", "").strip()
-        gender = data.get("gender", "").strip()
-        topic = data.get("topic", data.get("education_goal", "")).strip()
-        generate_images = data.get("generate_images", True)
-        use_fast_mode = data.get("fast_mode", True)
+        r = jsonify({"status": "ok"})
+        r.headers.add("Access-Control-Allow-Origin", "*")
+        r.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        r.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        return r
 
-        logger.info(f"📝 요청 데이터: {name}, {age}, {gender}, {topic}, 이미지생성: {generate_images}, 빠른모드: {use_fast_mode}")
+    try:
+        logger.info("🚀 /generate-full")
+        data = request.get_json(force=True)
+        name = (data.get("name") or "").strip()
+        age = (data.get("age") or "").strip()
+        gender = (data.get("gender") or "").strip()
+        topic = (data.get("topic") or data.get("education_goal") or "").strip()
+        generate_images = bool(data.get("generate_images", True))
+        use_fast_mode = bool(data.get("fast_mode", True))
 
         if not all([name, age, gender, topic]):
-            logger.error("❌ 입력 데이터 누락")
             return jsonify({"error": "입력 누락"}), 400
 
-        logger.info("🎨 동화 생성 시작...")
-        
-        # 빠른 모드 설정 적용
-        if use_fast_mode:
-            global USE_CHEAPER_MODEL
-            USE_CHEAPER_MODEL = True
-        
-        # 이미지 생성 여부에 따라 다른 함수 사용
+        # 모드 반영
+        global USE_CHEAPER_MODEL
+        USE_CHEAPER_MODEL = use_fast_mode
+
         if generate_images:
-            result = generate_story_with_images(name, age, gender, topic, generate_images)
+            result = generate_story_with_images(name, age, gender, topic, True)
         else:
-            character = generate_character_profile(name, age, gender)
-            story = generate_story_text(name, age, gender, topic)
-            result = {
-                "title": story.get("title"),
-                "character_profile": character,
-                "chapters": story.get("chapters", []),
-                "ending": story.get("ending", "")
-            }
+            cp = generate_character_profile(name, age, gender)
+            st = generate_story_text(name, age, gender, topic)
+            result = {"title": st.get("title"), "character_profile": cp,
+                      "chapters": st.get("chapters", []), "ending": st.get("ending", "")}
 
-        logger.info(f"✅ 동화 생성 완료: {result.get('title')}")
-        
-        # CORS 헤더 추가
-        response = jsonify(result)
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        response.headers.add("Access-Control-Allow-Credentials", "true")
-        
-        return response
-
+        r = jsonify(result)
+        r.headers.add("Access-Control-Allow-Origin", "*")
+        r.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        r.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        r.headers.add("Access-Control-Allow-Credentials", "true")
+        return r
     except Exception as e:
-        logger.error(f"❌ /generate-full 오류: {str(e)}")
-        error_response = jsonify({"error": f"서버 오류: {str(e)}"})
-        error_response.headers.add("Access-Control-Allow-Origin", "*")
-        error_response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        error_response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        error_response.headers.add("Access-Control-Allow-Credentials", "true")
-        return error_response, 500
+        logger.error(f"/generate-full 오류: {e}")
+        er = jsonify({"error": f"서버 오류: {str(e)}"})
+        er.headers.add("Access-Control-Allow-Origin", "*")
+        er.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        er.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        er.headers.add("Access-Control-Allow-Credentials", "true")
+        return er, 500
 
 @app.route("/health", methods=["GET", "OPTIONS"])
 def health_check():
-    """서버 상태 확인"""
-    
     if request.method == "OPTIONS":
-        response = jsonify({"status": "ok"})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        return response
-    
-    logger.info("🏥 Health check 요청")
-    response = jsonify({"status": "healthy", "timestamp": time.time()})
-    response.headers.add("Access-Control-Allow-Origin", "*")
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-    response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    return response
+        r = jsonify({"status": "ok"})
+        r.headers.add("Access-Control-Allow-Origin", "*")
+        r.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        r.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        return r
+    r = jsonify({"status": "healthy", "timestamp": time.time()})
+    r.headers.add("Access-Control-Allow-Origin", "*")
+    r.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    r.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    return r
 
 @app.route("/simple-test", methods=["GET", "POST", "OPTIONS"])
 def simple_test():
-    """간단한 테스트 엔드포인트"""
-    
     if request.method == "OPTIONS":
-        response = jsonify({"status": "ok"})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        return response
-    
-    logger.info("🧪 Simple test 요청")
-    response = jsonify({
-        "message": "서버가 정상 작동 중입니다!",
-        "timestamp": time.time(),
-        "status": "success"
-    })
-    response.headers.add("Access-Control-Allow-Origin", "*")
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-    response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    return response
+        r = jsonify({"status": "ok"})
+        r.headers.add("Access-Control-Allow-Origin", "*")
+        r.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        r.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        return r
+    r = jsonify({"message": "서버 정상", "timestamp": time.time(), "status": "success"})
+    r.headers.add("Access-Control-Allow-Origin", "*")
+    r.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    r.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    return r
 
 if __name__ == "__main__":
     logger.info("🚀 MyTales AI 서버 시작")
