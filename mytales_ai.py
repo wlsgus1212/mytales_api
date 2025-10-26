@@ -3,36 +3,37 @@ from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import os, json, re, time, logging, random
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, __version__ as openai_version
 
-# ─────────────────────────────
-# 환경
-# ─────────────────────────────
+# ───────── 환경 ─────────
 load_dotenv()
-API_KEY = os.getenv("OPENAI_API_KEY")
+API_KEY = os.getenv("OPENAI_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 if not API_KEY:
     raise RuntimeError("OPENAI_API_KEY not set in .env")
 client = OpenAI(api_key=API_KEY)
 
+# SDK 최소 버전 확인
+def _ver_tuple(v): 
+    try: return tuple(map(int, v.split(".")[:2]))
+    except: return (0,0)
+if _ver_tuple(openai_version) < (1, 52):
+    raise RuntimeError(f"openai SDK too old: {openai_version}. Upgrade to >=1.52.0")
+
 app = Flask(__name__)
 CORS(app)
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mytales")
 
-# ─────────────────────────────
-# 전역 옵션
-# ─────────────────────────────
-USE_CHEAPER_MODEL = False   # 품질 우선
+# ───────── 전역 옵션 ─────────
+USE_CHEAPER_MODEL = False        # 품질 우선
 SKIP_IMAGES_BY_DEFAULT = False
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
+IMAGE_SIZE  = os.getenv("IMAGE_SIZE",  "1792x1024")  # Wix 가로형
 
 def pick_model():
-    # 고품질 vs 비용절감
     return "gpt-4o-mini" if USE_CHEAPER_MODEL else "gpt-4o"
 
-# ─────────────────────────────
-# 유틸
-# ─────────────────────────────
+# ───────── 유틸 ─────────
 def clean_json_blocks(s: str) -> str:
     s = re.sub(r"```(?:json)?", "", s).strip()
     return s.strip("` \n\t")
@@ -53,9 +54,7 @@ def clamp_age(age):
     except:
         return 6
 
-# ─────────────────────────────
-# 캐릭터 프로필
-# ─────────────────────────────
+# ───────── 캐릭터 ─────────
 def generate_character_profile(name, age, gender):
     age = clamp_age(age)
     hair_styles = [
@@ -88,9 +87,7 @@ def generate_character_profile(name, age, gender):
     logger.info(f"✅ 캐릭터 프로필: {profile}")
     return profile
 
-# ─────────────────────────────
-# 스토리 생성
-# ─────────────────────────────
+# ───────── 스토리 ─────────
 def story_prompt(name, age, gender, topic, anchor):
     return f"""
 당신은 5~9세 아동용 감성 그림책 작가 겸 편집자다.
@@ -102,8 +99,7 @@ def story_prompt(name, age, gender, topic, anchor):
 작성 규칙:
 - 총 5개 챕터. 각 챕터 paragraphs 2~4문장. 짧고 리듬감 있게.
 - 구조: 도입→갈등→깨달음→변화→희망.
-- 내면은 행동·대사·상황으로 보여주기.
-- 설명형 교훈 금지. 자연스러운 체득.
+- 내면은 행동·대사·상황으로 보여주기. 설명형 교훈 금지.
 - 각 챕터에 illustration 필수: 구도(카메라), 배경, 조명, 소품, 색, 상징, 감정, '{anchor}' 동일 외형 지시 포함.
 
 반드시 아래 JSON만 반환:
@@ -161,12 +157,10 @@ def generate_story_text(name, age, gender, topic):
 
     raise RuntimeError("스토리 JSON 생성 실패")
 
-# ─────────────────────────────
-# 이미지 생성
-# ─────────────────────────────
+# ───────── 이미지 ─────────
 def build_image_prompt(chapter_content, character_profile, chapter_index):
     title = chapter_content.get("title", f"챕터 {chapter_index+1}")
-    illu = chapter_content.get("illustration", "")
+    illu  = chapter_content.get("illustration", "")
     anchor = character_profile["anchor"]
     canonical = character_profile["canonical"]
 
@@ -176,27 +170,34 @@ Children's picture-book illustration, chapter {chapter_index+1}: "{title}"
 Scene:
 {illu}
 
-Main character:
+Main character sheet (must match 1:1 in every scene):
 {canonical}
-Always include the hidden anchor token {anchor} in the scene description to keep identity consistent.
+Hidden identity anchor: {anchor}
 
-Art direction:
-- Wide composition showing environment
-- Character medium size with readable expression
-- Soft lighting, warm palette, gentle textures for ages 5–9
-- Clear focal point, minimal clutter, cohesive style across chapters
-- Subtle symbolic elements that reflect the moral theme
+Composition checklist:
+- Single wide shot showing environment (no collage, no split panels)
+- Character medium size, clean silhouette, readable facial expression
+- Camera: eye-level, 35mm lens equivalent, gentle perspective
+- Lighting: soft key light with warm bounce, natural falloff
+- Palette: warm pastels with subtle complementary accents
+- Background: simplified props only; avoid clutter
+- Symbolic elements that reflect the moral of this chapter
 
-Output: one coherent illustration. No text overlays, no collages.
+Strict negatives:
+- No text, captions, watermarks
+- No deformed anatomy, extra fingers/limbs
+- No harsh outlines, posterization, melted shapes
+- No phototype, UI mockups
 """.strip()
 
 def generate_image(chapter_content, character_profile, chapter_index):
     try:
         prompt = build_image_prompt(chapter_content, character_profile, chapter_index)
+        logger.info(f"🖼️ 이미지 생성: 챕터 {chapter_index+1} | model={IMAGE_MODEL} size={IMAGE_SIZE}")
         img = client.images.generate(
-            model="gpt-image-1",
+            model=IMAGE_MODEL,
             prompt=prompt,
-            size="1024x1024",
+            size=IMAGE_SIZE,
             n=1
         )
         return img.data[0].url
@@ -204,9 +205,7 @@ def generate_image(chapter_content, character_profile, chapter_index):
         logger.error(f"이미지 생성 실패 #{chapter_index+1}: {e}")
         return None
 
-# ─────────────────────────────
-# 파이프라인
-# ─────────────────────────────
+# ───────── 파이프라인 ─────────
 def generate_story_with_images(name, age, gender, topic, generate_images=True):
     story, profile = generate_story_text(name, age, gender, topic)
     if generate_images and not SKIP_IMAGES_BY_DEFAULT:
@@ -221,9 +220,7 @@ def generate_story_with_images(name, age, gender, topic, generate_images=True):
         "ending": story.get("ending", "")
     }
 
-# ─────────────────────────────
-# 템플릿 라우트
-# ─────────────────────────────
+# ───────── 템플릿 라우트 ─────────
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -272,9 +269,7 @@ def thank_you():
 def admin():
     return render_template("admin.html")
 
-# ─────────────────────────────
-# API
-# ─────────────────────────────
+# ───────── API ─────────
 @app.route("/generate-full", methods=["POST", "OPTIONS"])
 def generate_full():
     if request.method == "OPTIONS":
@@ -324,7 +319,7 @@ def generate_full():
         er.headers.add("Access-Control-Allow-Credentials", "true")
         return er, 500
 
-@app.route("/health", methods=["GET", "OPTIONS"])
+@app.route("/health", methods=["GET", 'OPTIONS'])
 def health_check():
     if request.method == "OPTIONS":
         r = jsonify({"status": "ok"})
@@ -352,8 +347,18 @@ def simple_test():
     r.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
     return r
 
+# 진단용
+@app.route("/diag", methods=["GET"])
+def diag():
+    return jsonify({
+        "openai_version": openai_version,
+        "image_model": IMAGE_MODEL,
+        "image_size": IMAGE_SIZE,
+        "cheap_mode": USE_CHEAPER_MODEL
+    })
+
 if __name__ == "__main__":
     logger.info("🚀 MyTales AI 서버 시작")
     logger.info(f"💰 저렴한 모델 사용: {USE_CHEAPER_MODEL}")
-    logger.info(f"🖼️ 이미지 생성 기본값: {not SKIP_IMAGES_BY_DEFAULT}")
+    logger.info(f"🖼️ 이미지 모델: {IMAGE_MODEL}, 크기: {IMAGE_SIZE}")
     app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
