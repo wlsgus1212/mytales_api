@@ -1,5 +1,4 @@
-# mytales_ai.py
-import sys, os, re, json, time, random, logging
+#import sys, os, re, json, time, random, logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -24,8 +23,8 @@ OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "120"))
 OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "1"))
 STORY_MODEL_PREVIEW = os.getenv("STORY_MODEL_PREVIEW", "gpt-4o-mini")
 STORY_MODEL_FULL = os.getenv("STORY_MODEL_FULL", "gpt-4o")
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
-SUPPORTED_IMG_SIZES = {"1024x1024", "1536x1024", "1024x1536", "auto"}
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "dall-e-3")
+SUPPORTED_IMG_SIZES = {"1024x1024", "1792x1024", "1024x1792"}
 IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024")
 if IMAGE_SIZE not in SUPPORTED_IMG_SIZES:
     IMAGE_SIZE = "1024x1024"
@@ -34,19 +33,19 @@ client = OpenAI(api_key=API_KEY, timeout=OPENAI_TIMEOUT, max_retries=OPENAI_MAX_
 
 # ── 앱 ───────────────────────────────────────────────────────────
 app = Flask(__name__)
-CORS(app)
-
-@app.after_request
-def add_cors_headers(r):
-    r.headers["Access-Control-Allow-Origin"] = "*"
-    r.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    r.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    return r
+# CORS 설정 - 모든 도메인에서 접근 허용
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"]
+    }
+})
 
 @app.route("/", methods=["GET", "OPTIONS"])
 def root():
     if request.method == "OPTIONS":
-        return jsonify({"ok": True})
+        return jsonify({"ok": True}), 200
     return jsonify({"ok": True, "ts": time.time()})
 
 # ── 유틸 ─────────────────────────────────────────────────────────
@@ -210,63 +209,73 @@ def build_image_prompt_kor(scene_sentence: str, character_profile: dict, scene_i
     )
 
 # ── API: /generate-story ─────────────────────────────────────────
-@app.post("/generate-story")
+@app.route("/generate-story", methods=["POST", "OPTIONS"])
 def api_generate_story():
-    data = request.get_json(force=True)
-    name = (data.get("name") or "").strip()
-    age = (data.get("age") or "").strip()
-    gender = (data.get("gender") or "").strip()
-    topic = (data.get("topic") or data.get("education_goal") or "").strip()
-    cost_mode = (data.get("cost_mode") or "preview").lower()  # preview | full
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True}), 200
+    
+    try:
+        data = request.get_json(force=True) or {}
+        name = (data.get("name") or "").strip()
+        age = (data.get("age") or "").strip()
+        gender = (data.get("gender") or "").strip()
+        topic = (data.get("topic") or data.get("education_goal") or "").strip()
+        cost_mode = (data.get("cost_mode") or "preview").lower()
 
-    if not all([name, age, gender, topic]):
-        return jsonify({"error": "name, age, gender, topic 모두 필요"}), 400
+        if not all([name, age, gender, topic]):
+            return jsonify({"error": "name, age, gender, topic 모두 필요"}), 400
 
-    character_profile = generate_character_profile(name, age, gender)
-    story_data = generate_story_text(name, age, gender, topic, cost_mode=cost_mode)
+        character_profile = generate_character_profile(name, age, gender)
+        story_data = generate_story_text(name, age, gender, topic, cost_mode=cost_mode)
 
-    chapters = story_data.get("chapters", [])
-    image_descriptions, image_prompts = [], []
-    accumulated = ""
+        chapters = story_data.get("chapters", [])
+        image_descriptions, image_prompts = [], []
+        accumulated = ""
 
-    for idx, ch in enumerate(chapters, start=1):
-        para = ch.get("paragraph", "")
-        prev = accumulated or "이야기 시작"
-        desc = describe_scene_kor(para, character_profile, idx, prev)
-        prompt = build_image_prompt_kor(desc, character_profile, idx)
-        image_descriptions.append(desc)
-        image_prompts.append(prompt)
-        accumulated += (" " + para) if para else accumulated
+        for idx, ch in enumerate(chapters, start=1):
+            para = ch.get("paragraph", "")
+            prev = accumulated or "이야기 시작"
+            desc = describe_scene_kor(para, character_profile, idx, prev)
+            prompt = build_image_prompt_kor(desc, character_profile, idx)
+            image_descriptions.append(desc)
+            image_prompts.append(prompt)
+            accumulated += (" " + para) if para else accumulated
 
-    return jsonify({
-        "title": story_data.get("title"),
-        "character_profile": character_profile,
-        "story_paragraphs": [c.get("paragraph", "") for c in chapters],
-        "image_descriptions": image_descriptions,
-        "image_prompts": image_prompts,
-        "ending": story_data.get("ending", ""),
-        "cost_mode": cost_mode
-    })
+        return jsonify({
+            "title": story_data.get("title"),
+            "character_profile": character_profile,
+            "story_paragraphs": [c.get("paragraph", "") for c in chapters],
+            "image_descriptions": image_descriptions,
+            "image_prompts": image_prompts,
+            "ending": story_data.get("ending", ""),
+            "cost_mode": cost_mode
+        })
+    except Exception as e:
+        logger.exception("스토리 생성 중 오류")
+        return jsonify({"error": "서버 오류 발생", "detail": str(e)}), 500
 
 # ── API: /generate-image ─────────────────────────────────────────
-@app.post("/generate-image")
+@app.route("/generate-image", methods=["POST", "OPTIONS"])
 def api_generate_image():
-    data = request.get_json(force=True)
-    character_profile = ensure_character_profile(data.get("character_profile"))
-    scene_description = data.get("image_description") or ""
-    scene_index = int(data.get("scene_index") or 1)
-
-    if not character_profile or not scene_description:
-        return jsonify({"error": "character_profile 및 image_description 필요"}), 400
-
-    prompt = build_image_prompt_kor(scene_description, character_profile, scene_index)
-    logger.info(f"이미지 생성 {scene_index}: {prompt[:140]}...")
-
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True}), 200
+    
     try:
+        data = request.get_json(force=True) or {}
+        character_profile = ensure_character_profile(data.get("character_profile"))
+        scene_description = data.get("image_description") or ""
+        scene_index = int(data.get("scene_index") or 1)
+
+        if not character_profile or not scene_description:
+            return jsonify({"error": "character_profile 및 image_description 필요"}), 400
+
+        prompt = build_image_prompt_kor(scene_description, character_profile, scene_index)
+        logger.info(f"이미지 생성 {scene_index}: {prompt[:140]}...")
+
         res = client.images.generate(
             model=IMAGE_MODEL,
             prompt=prompt,
-            size=IMAGE_SIZE,  # 1024x1024 권장
+            size=IMAGE_SIZE,
             n=1
         )
         url = res.data[0].url if res and res.data else None
@@ -278,7 +287,7 @@ def api_generate_image():
         return jsonify({"error": "이미지 생성 실패", "detail": str(e)}), 500
 
 # ── 헬스/진단 ───────────────────────────────────────────────────
-@app.get("/health")
+@app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "healthy",
@@ -293,8 +302,4 @@ def health():
 
 # ── 실행 ────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # 로컬 개발용. Render 배포는 gunicorn 사용 권장:
-    # gunicorn -w 1 -k gthread --threads 8 -t 600 \
-    #   --bind 0.0.0.0:$PORT --log-level info --access-logfile - --error-logfile - \
-    #   mytales_ai:app
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
