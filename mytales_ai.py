@@ -298,13 +298,31 @@ def api_generate_full():
             image_prompts.append(prompt)
             accumulated += (" " + para) if para else accumulated
 
-        # Wix가 기대하는 형식으로 변환 (이미지 URL은 null로 설정, 클라이언트가 별도로 생성)
+        # 이미지 URL 생성
+        image_urls = []
+        for idx, prompt in enumerate(image_prompts, start=1):
+            try:
+                logger.info(f"이미지 {idx} 생성 중...")
+                res = client.images.generate(
+                    model=IMAGE_MODEL,
+                    prompt=prompt,
+                    size=IMAGE_SIZE,
+                    n=1
+                )
+                url = res.data[0].url if res and res.data else None
+                image_urls.append(url)
+                logger.info(f"이미지 {idx} 생성 완료")
+            except Exception as e:
+                logger.warning(f"이미지 {idx} 생성 실패: {e}")
+                image_urls.append(None)
+
+        # Wix가 기대하는 형식으로 변환
         story_chapters = []
         for idx, ch in enumerate(chapters):
             story_chapters.append({
                 "title": ch.get("title", f"장면 {idx + 1}"),
                 "paragraphs": [ch.get("paragraph", "")],
-                "image_url": None  # 이미지는 결과 페이지에서 별도 생성
+                "image_url": image_urls[idx] if idx < len(image_urls) else None
             })
 
         return jsonify({
