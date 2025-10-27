@@ -283,7 +283,7 @@ def api_generate_full():
         story_data = generate_story_text(name, age, gender, topic, cost_mode=cost_mode)
 
         chapters = story_data.get("chapters", [])
-        image_descriptions, image_prompts = [], []
+        image_descriptions, image_prompts, image_urls = [], [], []
         accumulated = ""
 
         for idx, ch in enumerate(chapters, start=1):
@@ -294,13 +294,39 @@ def api_generate_full():
             image_descriptions.append(desc)
             image_prompts.append(prompt)
             accumulated += (" " + para) if para else accumulated
+            
+            # 실제 이미지 생성
+            try:
+                res = client.images.generate(
+                    model=IMAGE_MODEL,
+                    prompt=prompt,
+                    size=IMAGE_SIZE,
+                    n=1
+                )
+                url = res.data[0].url if res and res.data else None
+                image_urls.append(url)
+                logger.info(f"이미지 {idx} 생성 완료")
+            except Exception as e:
+                logger.warning(f"이미지 {idx} 생성 실패: {e}")
+                image_urls.append(None)
+
+        # Wix가 기대하는 형식으로 변환
+        story_chapters = []
+        for idx, ch in enumerate(chapters):
+            story_chapters.append({
+                "title": ch.get("title", f"장면 {idx + 1}"),
+                "paragraphs": [ch.get("paragraph", "")],
+                "image_url": image_urls[idx] if idx < len(image_urls) else None
+            })
 
         return jsonify({
             "title": story_data.get("title"),
             "character_profile": character_profile,
+            "chapters": story_chapters,
             "story_paragraphs": [c.get("paragraph", "") for c in chapters],
             "image_descriptions": image_descriptions,
             "image_prompts": image_prompts,
+            "image_urls": image_urls,
             "ending": story_data.get("ending", ""),
             "cost_mode": cost_mode
         })
