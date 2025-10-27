@@ -41,13 +41,14 @@ client = OpenAI(api_key=API_KEY, timeout=OPENAI_TIMEOUT, max_retries=OPENAI_MAX_
 # ── 앱 ───────────────────────────────────────────────────────────
 app = Flask(__name__)
 # CORS 설정 - 모든 도메인에서 접근 허용
-CORS(app, resources={
-    r"/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"]
-    }
-})
+CORS(app, origins="*", supports_credentials=True)
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 @app.route("/", methods=["GET", "OPTIONS"])
 def root():
@@ -218,6 +219,52 @@ def build_image_prompt_kor(scene_sentence: str, character_profile: dict, scene_i
 # ── API: /generate-story ─────────────────────────────────────────
 @app.route("/generate-story", methods=["POST", "OPTIONS"])
 def api_generate_story():
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True}), 200
+    
+    try:
+        data = request.get_json(force=True) or {}
+        name = (data.get("name") or "").strip()
+        age = (data.get("age") or "").strip()
+        gender = (data.get("gender") or "").strip()
+        topic = (data.get("topic") or data.get("education_goal") or "").strip()
+        cost_mode = (data.get("cost_mode") or "preview").lower()
+
+        if not all([name, age, gender, topic]):
+            return jsonify({"error": "name, age, gender, topic 모두 필요"}), 400
+
+        character_profile = generate_character_profile(name, age, gender)
+        story_data = generate_story_text(name, age, gender, topic, cost_mode=cost_mode)
+
+        chapters = story_data.get("chapters", [])
+        image_descriptions, image_prompts = [], []
+        accumulated = ""
+
+        for idx, ch in enumerate(chapters, start=1):
+            para = ch.get("paragraph", "")
+            prev = accumulated or "이야기 시작"
+            desc = describe_scene_kor(para, character_profile, idx, prev)
+            prompt = build_image_prompt_kor(desc, character_profile, idx)
+            image_descriptions.append(desc)
+            image_prompts.append(prompt)
+            accumulated += (" " + para) if para else accumulated
+
+        return jsonify({
+            "title": story_data.get("title"),
+            "character_profile": character_profile,
+            "story_paragraphs": [c.get("paragraph", "") for c in chapters],
+            "image_descriptions": image_descriptions,
+            "image_prompts": image_prompts,
+            "ending": story_data.get("ending", ""),
+            "cost_mode": cost_mode
+        })
+    except Exception as e:
+        logger.exception("스토리 생성 중 오류")
+        return jsonify({"error": "서버 오류 발생", "detail": str(e)}), 500
+
+@app.route("/generate-full", methods=["POST", "OPTIONS"])
+def api_generate_full():
+    """이미지 포함 전체 스토리 생성 엔드포인트"""
     if request.method == "OPTIONS":
         return jsonify({"ok": True}), 200
     
