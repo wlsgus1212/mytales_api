@@ -29,7 +29,8 @@ OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "120"))
 OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "1"))
 STORY_MODEL_PREVIEW = os.getenv("STORY_MODEL_PREVIEW", "gpt-4o-mini")
 STORY_MODEL_FULL = os.getenv("STORY_MODEL_FULL", "gpt-4o")
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "dall-e-3")
+# dall-e-3 is the only valid DALL-E model name
+IMAGE_MODEL = "dall-e-3"
 SUPPORTED_IMG_SIZES = {"1024x1024", "1792x1024", "1024x1792"}
 IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024")
 if IMAGE_SIZE not in SUPPORTED_IMG_SIZES:
