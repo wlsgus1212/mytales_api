@@ -279,13 +279,16 @@ def api_generate_full():
         if not all([name, age, gender, topic]):
             return jsonify({"error": "name, age, gender, topic 모두 필요"}), 400
 
+        logger.info(f"generate-full 요청: {name}, {age}, {gender}, {topic}")
+
         character_profile = generate_character_profile(name, age, gender)
         story_data = generate_story_text(name, age, gender, topic, cost_mode=cost_mode)
 
         chapters = story_data.get("chapters", [])
-        image_descriptions, image_prompts, image_urls = [], [], []
+        image_descriptions, image_prompts = [], []
         accumulated = ""
 
+        # 이미지 URL은 나중에 생성 (타임아웃 방지)
         for idx, ch in enumerate(chapters, start=1):
             para = ch.get("paragraph", "")
             prev = accumulated or "이야기 시작"
@@ -294,29 +297,14 @@ def api_generate_full():
             image_descriptions.append(desc)
             image_prompts.append(prompt)
             accumulated += (" " + para) if para else accumulated
-            
-            # 실제 이미지 생성
-            try:
-                res = client.images.generate(
-                    model=IMAGE_MODEL,
-                    prompt=prompt,
-                    size=IMAGE_SIZE,
-                    n=1
-                )
-                url = res.data[0].url if res and res.data else None
-                image_urls.append(url)
-                logger.info(f"이미지 {idx} 생성 완료")
-            except Exception as e:
-                logger.warning(f"이미지 {idx} 생성 실패: {e}")
-                image_urls.append(None)
 
-        # Wix가 기대하는 형식으로 변환
+        # Wix가 기대하는 형식으로 변환 (이미지 URL은 null로 설정, 클라이언트가 별도로 생성)
         story_chapters = []
         for idx, ch in enumerate(chapters):
             story_chapters.append({
                 "title": ch.get("title", f"장면 {idx + 1}"),
                 "paragraphs": [ch.get("paragraph", "")],
-                "image_url": image_urls[idx] if idx < len(image_urls) else None
+                "image_url": None  # 이미지는 결과 페이지에서 별도 생성
             })
 
         return jsonify({
@@ -326,7 +314,6 @@ def api_generate_full():
             "story_paragraphs": [c.get("paragraph", "") for c in chapters],
             "image_descriptions": image_descriptions,
             "image_prompts": image_prompts,
-            "image_urls": image_urls,
             "ending": story_data.get("ending", ""),
             "cost_mode": cost_mode
         })
