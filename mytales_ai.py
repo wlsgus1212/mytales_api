@@ -1,288 +1,156 @@
 # mytales_ai.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import os, json, time, re, uuid, random, hashlib, logging
-from dotenv import load_dotenv
 from openai import OpenAI
+from dotenv import load_dotenv
+import os, logging, time, json
 
-# ── env ─────────────────────────────────────────────────────────────────
+# ─────────────────────────────
+# 환경 설정
+# ─────────────────────────────
 load_dotenv()
-API_KEY       = os.getenv("OPENAI_API_KEY")
+API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
-    raise RuntimeError("OPENAI_API_KEY not found")
+    raise RuntimeError("OPENAI_API_KEY not found. Please set it in .env file")
 
-TEXT_MODEL    = os.getenv("TEXT_MODEL", "gpt-4o-mini")   # gpt-4o | gpt-4o-mini
-TEXT_T        = float(os.getenv("TEXT_T", "0.6"))
-TEXT_TOP_P    = float(os.getenv("TEXT_TOP_P", "0.9"))
-TEXT_PP       = float(os.getenv("TEXT_PP", "0.0"))
-OPENAI_TIMEOUT= float(os.getenv("OPENAI_TIMEOUT", "25.0"))
-
-IMAGE_MODEL   = os.getenv("IMAGE_MODEL", "gpt-image-1")
-IMAGE_SIZE    = os.getenv("IMAGE_SIZE", "1024x1024")     # 1024x1024|1024x1536|1536x1024|auto
-IMG_RETRIES   = int(os.getenv("IMG_RETRIES", "2"))
-CACHE_TTL_S   = int(os.getenv("CACHE_TTL_S", "600"))
-
-# ── app ─────────────────────────────────────────────────────────────────
+client = OpenAI(api_key=API_KEY)
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mytales")
 
-# gzip(선택)
-try:
-    from flask_compress import Compress
-    Compress(app)
-except Exception:
-    pass
+# ─────────────────────────────
+# 주제별 시각 테마 매핑
+# ─────────────────────────────
+THEME_MAP = {
+    "편식": {"palette": "soft green and orange", "lighting": "morning sunlight in a cozy kitchen"},
+    "짜증": {"palette": "warm red and lilac purple", "lighting": "evening glow with soft sparkles"},
+    "거짓말": {"palette": "gentle blue and gray", "lighting": "night moonlight reflection on floor"},
+    "싸움": {"palette": "teal and golden yellow", "lighting": "playground sunset light"},
+    "미루기": {"palette": "pastel pink and beige", "lighting": "soft morning light on desk"},
+    "두려움": {"palette": "soft navy and mint", "lighting": "twilight gentle blue"},
+    "불안": {"palette": "lavender and warm beige", "lighting": "early morning soft glow"},
+    "자존감": {"palette": "sky blue and white", "lighting": "bright afternoon light"},
+}
+DEFAULT_THEME = {"palette": "pastel rainbow mix", "lighting": "warm daylight"}
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(message)s")
-log = logging.getLogger("mytales")
+# ─────────────────────────────
+# 프롬프트 (훈육 주제별 상황 포함)
+# ─────────────────────────────
+PROMPT_TEMPLATE = """
+너는 5~9세 어린이를 위한 **훈육 중심 감성 동화 작가**야.  
+입력된 정보를 바탕으로, 아이가 공감하며 스스로 배우는 짧고 따뜻한 이야기를 만들어.  
 
-# OpenAI client with timeout
-client = OpenAI(api_key=API_KEY, timeout=OPENAI_TIMEOUT)
+─────────────────────────────
+📥 입력 정보  
+- 이름: {name}  
+- 나이: {age}  
+- 성별: {gender}  
+- 훈육 주제: {goal}  
+─────────────────────────────
 
-# ── small caches (mem) ─────────────────────────────────────────────────
-_STORY_CACHE = {}
-_IMAGE_CACHE = {}
+🎯 이야기 목적  
+- 훈육을 꾸짖음이 아닌 **공감과 상상**으로 표현한다.  
+- 직접적인 해결(“짜증을 참았어요”, “맛있었어요”, “화해했어요”)은 금지.  
+- 대신 아이의 감정이나 행동이 **상징적 변화·마법적 체험**을 통해 변한다.  
+- 아이는 이야기 속 경험으로 ‘다시 해보고 싶다’는 느낌을 받는다.
 
-def _now(): return time.time()
+─────────────────────────────
+🧭 감정 흐름 (6단계 구조)
+1. 공감 – 아이의 감정이나 불편함 묘사  
+2. 고립 – 혼자 있는 순간  
+3. 조력자 등장 – 상상 속 존재 등장 (요정·로봇·동물 등)  
+4. 제안 – 조력자의 흥미로운 제안 또는 마법적 제시  
+5. 시도 – 아이가 새로운 행동을 해봄  
+6. 변화 – 직접적 해결 없이 상징적 변화나 신체감각으로 마무리  
 
-def _cache_get(store, key):
-    v = store.get(key)
-    if not v: return None
-    if v["exp"] < _now():
-        try: del store[key]
-        except: pass
-        return None
-    return v["val"]
+─────────────────────────────
+📖 표현 규칙
+- 한 문장 12~15자, 한 장면 40~80자.
+- 한자·추상어 금지 (“성실”, “용기” 대신 구체적 묘사)
+- 감정은 몸짓으로 (“화났다” 대신 “볼이 빨개졌어요”)
+- 훈육 주제 이름을 직접 말하지 않는다 (“편식”, “짜증” 등의 단어 사용 금지)
+- 마무리는 다음 행동의 ‘기대감’으로.
 
-def _cache_set(store, key, val, ttl=CACHE_TTL_S):
-    store[key] = {"val": val, "exp": _now() + ttl}
+─────────────────────────────
+📸 시각 요소
+각 장면은 동일한 캐릭터·색감·의상·조명으로 유지한다.
+장면은 총 6장으로 구성된다.
 
-def _hash(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:24]
-
-# ── style presets ──────────────────────────────────────────────────────
-PALETTES = [
-  "soft pastel spring", "warm sunset pastel",
-  "cool morning pastel", "mint-lilac cream", "peach-ivory sky"
-]
-ROOMS = ["따뜻한 햇살의 주방 식탁", "창가가 밝은 거실 테이블", "아늑한 식탁 옆 작은 창문"]
-OUTFITS_F = [
-  "하늘색 원피스+흰 양말+노란 슬리퍼",
-  "복숭아 티셔츠+민트 스커트+흰 운동화",
-  "연보라 원피스+아이보리 가디건+플랫슈즈",
-]
-OUTFITS_M = [
-  "하늘색 티셔츠+네이비 반바지+운동화",
-  "라임 티셔츠+베이지 팬츠+운동화",
-  "민트 후드+회색 반바지+운동화",
-]
-
-def story_seed():
-    return uuid.uuid5(uuid.NAMESPACE_DNS, str(time.time_ns())).hex[:8]
-
-def choose_combo(gender: str):
-    outfit = random.choice(OUTFITS_F if str(gender).startswith("여") else OUTFITS_M)
-    room = random.choice(ROOMS)
-    palette = random.choice(PALETTES)
-    return outfit, room, palette
-
-# ── prompt (요청한 버전 그대로) ───────────────────────────────────────
-IMAGINATIVE_PROMPT_TEMPLATE = """
-너는 5~9세 어린이를 위한 ‘상상 인과형 감성 동화 작가’야.
-아이의 실제 행동을 직접 교정하지 않고, 상상 속 결과로 표현해야 해.
-
-[입력]
-- 이름: {name}
-- 나이: {age}
-- 성별: {gender}
-- 훈육 주제: {goal}
-
-[핵심 원칙]
-1) 직접 해결 금지: “짜증을 안 냈어요/화해했어요/편식이 사라졌어요/괜찮았어요” 금지.
-2) 결과는 현실이 아닌 상상 세계에서만 드러난다.
-3) 상상 결과는 은유적·신비한·미묘한 변화로 제시한다.
-4) 결말은 **작은 감각·상징으로 열린 결말**로 끝낸다. 교훈 문장 금지.
-
-[문체]
-- 5~9세 수준, 쉬운 단어.
-- 감정은 행동·상황으로 표현.
-- 따뜻하지만 약간 신비로운 분위기.
-
-[길이 규칙]
-- 반드시 6개 장면을 모두 채워라.
-- **각 장면 40~80자**로 제한(공백 포함). 문장 2~3문장 권장.
-- 총 분량은 300~600자 사이.
-
-[전역 스타일(일관성)]
-- style: "pastel watercolor storybook, palette: {palette}, STYLE_TOKEN#{seed}"
-- outfit: "{outfit}"
-- room: "{room}"
-- lighting: "soft afternoon sunlight"
-
-[출력(JSON만)]
+─────────────────────────────
+📘 출력 형식 (JSON)
 {{
- "title": "제목",
+ "title": "동화 제목",
  "protagonist": "{name} ({age}살 {gender})",
  "global_style": {{
-   "style": "pastel watercolor storybook, palette: {palette}, STYLE_TOKEN#{seed}",
-   "outfit": "{outfit}",
-   "room": "{room}",
-   "lighting": "soft afternoon sunlight"
+   "palette": "{palette}",
+   "lighting": "{lighting}",
+   "style": "pastel watercolor storybook"
  }},
  "scenes": [
-   {{"text": "장면1: 현실 감정 — 불편함·짜증·싫음 등 현실적 시작. 40~80자."}},
-   {{"text": "장면2: 이상한 징후 — 작은 소리·그림자·속삭임 등장. 40~80자."}},
-   {{"text": "장면3: 상상 세계 진입 — 조력자/상징 존재 만남. 40~80자."}},
-   {{"text": "장면4: 상상의 사건 — 이상한 규칙·은유 체험. 40~80자."}},
-   {{"text": "장면5: 현실 복귀 — 몸·마음의 미묘한 변화. 40~80자."}},
-   {{"text": "장면6: 여운 — 직접 해결 금지, **열린 결말**. 40~80자."}}
+   {{"text": "장면1 텍스트"}},
+   {{"text": "장면2 텍스트"}},
+   {{"text": "장면3 텍스트"}},
+   {{"text": "장면4 텍스트"}},
+   {{"text": "장면5 텍스트"}},
+   {{"text": "장면6 텍스트"}}
  ],
- "ending": "직접 교훈 없이, 꿈·감각·상징으로 잔잔히 마무리"
+ "ending": "따뜻하고 여운 있는 한 줄 마무리"
 }}
+─────────────────────────────
+이제 {name}의 나이, 성별, 훈육 주제에 맞는
+짧고 감성적인 동화를 만들어줘.
 """
 
-def build_prompt(name, age, gender, goal):
-    outfit, room, palette = choose_combo(gender)
-    seed = story_seed()
-    return IMAGINATIVE_PROMPT_TEMPLATE.format(
+# ─────────────────────────────
+# GPT 요청 함수
+# ─────────────────────────────
+def generate_story(name, age, gender, goal):
+    theme = THEME_MAP.get(goal, DEFAULT_THEME)
+    palette, lighting = theme["palette"], theme["lighting"]
+
+    prompt = PROMPT_TEMPLATE.format(
         name=name, age=age, gender=gender, goal=goal,
-        outfit=outfit, room=room, palette=palette, seed=seed
+        palette=palette, lighting=lighting
     )
 
-# ── anti direct-resolution(서버 안전망, 간결화) ───────────────────────
-DIRECT_RESOLUTION_PATTERNS = [
-  r"(했더니|하니|해서)\s*(기뻤|좋았|괜찮았|행복했|편해졌|모두\s*웃었|문제.*해결|화해했|다시는\s*안)"
-]
-def has_direct_resolution(paragraphs):
-    text = "\n".join(paragraphs or [])
-    return any(re.search(p, text) for p in DIRECT_RESOLUTION_PATTERNS)
+    logger.info(f"generate-story: {name}, {age}, {gender}, {goal}")
+    start = time.time()
 
-def neutralize_direct_resolution(paragraphs):
-    fixed = []
-    for p in paragraphs:
-        s = re.sub(DIRECT_RESOLUTION_PATTERNS[0],
-                   "작은 숨이 고요해졌어요.", p)
-        fixed.append(s)
-    return fixed
-
-# ── story generation ──────────────────────────────────────────────────
-def safe_json_parse(s: str):
-    s = (s or "").strip()
-    s = re.sub(r"^```json|^```|```$", "", s, flags=re.MULTILINE).strip()
-    m = re.search(r"\{.*\}\s*$", s, flags=re.DOTALL)
-    if m: s = m.group(0)
-    return json.loads(s)
-
-def generate_plan(name, age, gender, goal):
-    cache_key = _hash(f"story:{name}|{age}|{gender}|{goal}")
-    hit = _cache_get(_STORY_CACHE, cache_key)
-    if hit: return hit
-
-    prompt = build_prompt(name, age, gender, goal)
-    rsp = client.chat.completions.create(
-        model=TEXT_MODEL,
-        temperature=TEXT_T,
-        top_p=TEXT_TOP_P,
-        presence_penalty=TEXT_PP,
-        max_tokens=900,
-        messages=[{"role":"user","content":prompt}]
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": "You are a children’s story creator."},
+                  {"role": "user", "content": prompt}],
+        temperature=0.8,
+        max_tokens=1200
     )
-    plan = safe_json_parse(rsp.choices[0].message.content or "{}")
-    scenes = plan.get("scenes", []) or []
-    paragraphs = [(s.get("text","") if isinstance(s, dict) else str(s)) for s in scenes][:6]
+    elapsed = time.time() - start
+    logger.info(f"⏱ GPT 응답 시간: {elapsed:.1f}s")
 
-    if has_direct_resolution(paragraphs):
-        paragraphs = neutralize_direct_resolution(paragraphs)
-
-    result = {
-        "title": plan.get("title",""),
-        "protagonist": plan.get("protagonist",""),
-        "story_paragraphs": paragraphs,
-        "ending": plan.get("ending",""),
-        "scenes": scenes[:6],
-        "global_style": plan.get("global_style", {})
-    }
-    _cache_set(_STORY_CACHE, cache_key, result)
-    return result
-
-# ── image generation ──────────────────────────────────────────────────
-def build_image_prompt(scene_text: str, gs: dict, ref=False):
-    style    = gs.get("style","pastel watercolor storybook")
-    outfit   = gs.get("outfit","")
-    room     = gs.get("room","")
-    lighting = gs.get("lighting","soft afternoon sunlight")
-    tail = "same character, same outfit, same room, same lighting. "
-    tail += ("same seed as first image." if ref else "seed fixed.")
-    # 간결 프롬프트
-    return f"{style}. outfit:{outfit}. room:{room}. lighting:{lighting}. Illustrate: {scene_text}. {tail}"
-
-def generate_one_image(prompt: str, size=None):
-    size = size or IMAGE_SIZE
-    last_err = None
-    for _ in range(IMG_RETRIES + 1):
-        try:
-            img = client.images.generate(model=IMAGE_MODEL, prompt=prompt, size=size)
-            return {"b64": img.data[0].b64_json, "id": img.created}
-        except Exception as e:
-            last_err = e
-            time.sleep(0.6)
-    raise last_err
-
-# ── routes ────────────────────────────────────────────────────────────
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({
-        "ok": True,
-        "text_model": TEXT_MODEL,
-        "image_model": IMAGE_MODEL,
-        "image_size": IMAGE_SIZE,
-        "timeout": OPENAI_TIMEOUT,
-        "img_retries": IMG_RETRIES,
-        "cache_ttl_s": CACHE_TTL_S
-    })
-
-@app.route("/generate-story", methods=["POST"])
-def generate_story():
-    d = request.get_json(force=True)
-    name   = str(d.get("name","")).strip()
-    age    = int(d.get("age", 6))
-    gender = str(d.get("gender","여자")).strip()
-    goal   = d.get("topic") or d.get("goal") or "기타"
-    log.info(f"generate-story: {name}, {age}, {gender}, {goal}")
-    plan = generate_plan(name, age, gender, goal)
-    return jsonify(plan)
-
-@app.route("/generate-image", methods=["POST"])
-def generate_image():
-    d = request.get_json(force=True)
-    scene = d.get("scene", {}) or {}
-    gs = d.get("global_style", {}) or {}
-    is_ref = bool(d.get("is_reference", False))
-    scene_text = (scene.get("text","") if isinstance(scene, dict) else str(scene)).strip()
-    if not scene_text:
-        return jsonify({"error":"empty scene"}), 400
-
-    # 캐시 키: scene_text + style 일관성
-    cache_key = _hash(f"img:{scene_text}|{json.dumps(gs, ensure_ascii=False, sort_keys=True)}|{is_ref}")
-    hit = _cache_get(_IMAGE_CACHE, cache_key)
-    if hit:
-        return jsonify({"b64": hit})
-
-    prompt = build_image_prompt(scene_text, gs, ref=is_ref)
     try:
-        img = generate_one_image(prompt, IMAGE_SIZE)
-    except Exception as e:
-        return jsonify({"error": f"image_fail: {str(e)}"}), 504
+        text = response.choices[0].message.content.strip()
+        data = json.loads(text)
+        return data
+    except Exception:
+        logger.warning("⚠️ JSON 파싱 실패, 원문 반환")
+        return {"raw_text": response.choices[0].message.content}
 
-    _cache_set(_IMAGE_CACHE, cache_key, img["b64"])
-    return jsonify({"b64": img["b64"]})
-
+# ─────────────────────────────
+# 라우트
+# ─────────────────────────────
 @app.route("/generate-full", methods=["POST"])
-def generate_full_disabled():
-    return jsonify({"error": "disabled. use /generate-story then /generate-image per scene."}), 410
+def generate_full():
+    payload = request.get_json()
+    name = payload.get("name", "아이")
+    age = payload.get("age", "6")
+    gender = payload.get("gender", "아이")
+    goal = payload.get("topic", "감정 표현")
 
-# ── run ───────────────────────────────────────────────────────────────
+    result = generate_story(name, age, gender, goal)
+    return jsonify(result)
+
+# ─────────────────────────────
+# 메인
+# ─────────────────────────────
 if __name__ == "__main__":
-    # Render Start Command 권장:
-    # gunicorn -w 1 -k gevent -t 300 --worker-connections 50 mytales_ai:app
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+    app.run(host="0.0.0.0", port=10000)
