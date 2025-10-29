@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(mess
 log = logging.getLogger("mytales")
 
 # ─────────────────────────────────
-# prompt (text+images, JSON 출력 강제)
+# prompt (text+images, JSON 출력 강제) — 결말 규칙 수정 반영
 # ─────────────────────────────────
 STORY_AND_IMAGES_PROMPT = """
 너는 5~9세 어린이를 위한 **훈육 중심 감성 동화 작가**다.
@@ -61,11 +61,25 @@ STORY_AND_IMAGES_PROMPT = """
 - 비현실적 이유 금지(“색이 무서워서” X).
 - 감각 기반 표현 사용(“쓴맛일까 봐 싫어요”, “냄새가 이상해요”).
 - 어른은 강요 금지. 감정 인정.
-- 결말은 “맛있다” 대신 “생각보다 괜찮았어요/다음에 또 먹어볼까?”.
 
 ✨ 설득형(상상 보상형)
 - 이해가 어려우면 상상 보상(마법/초능력)로 흥미 유도.
-- 보상은 상징적·상상적 표현으로 마무리(기분·행동 변화로 연결).
+- 보상은 “맛”이 아니라 **이야기 자산**으로 제시:
+  - 능력 게이지(반짝 힘 게이지 +1)
+  - 컬렉션(채소 뱃지/도감 페이지)
+  - 관계 보상(조력자 약속·감사)
+  - 신체감각(“배가 편안했어요. 몸이 ‘좋아’라고 했어요.”)
+- 즉시 보상은 작게, 누적 보상은 크게. 다음 회차 동기를 남긴다.
+
+🏁 결말 규칙(맛 평가 금지)
+- “맛있다/괜찮다” 등 **맛 평가로 마무리 금지**.
+- 결말은 다음 중 하나로 끝낼 것:
+  1) 능력: “한입 해냈다. 내일은 두입.”
+  2) 탐험: “오늘은 색을 알아봤다. 내일은 냄새로 실험.”
+  3) 관계: “요정이 약속 카드를 주었다. 다음에 또 만나기로.”
+  4) 신체감각: “배가 편안했다. 몸이 ‘좋아’라고 했다.”
+  5) 수집/미션: “도전 스티커 1개 획득. 다섯 개면 별배지!”
+- 미세 목표 사용(한입→두입→한 조각). 실패 허용, 시도 칭찬.
 
 🎨 전역 스타일(이미지 일관성)
 - style: "pastel watercolor storybook"
@@ -86,9 +100,9 @@ STORY_AND_IMAGES_PROMPT = """
    "장면3 텍스트(조력자)",
    "장면4 텍스트(대화/제안)",
    "장면5 텍스트(자기 행동)",
-   "장면6 텍스트(성장·여운)"
+   "장면6 텍스트(성장·여운: 맛 평가 금지, 능력/탐험/관계/신체감각/수집 중 하나로)"
  ],
- "ending": "마무리 한두 문장",
+ "ending": "짧은 마무리(맛 평가 금지, 다음 회차 동기 남김)",
  "global_style": {{
    "style": "pastel watercolor storybook",
    "outfit": "{outfit}",
@@ -97,12 +111,12 @@ STORY_AND_IMAGES_PROMPT = """
    "seed_hint": "use same seed across all images"
  }},
  "image_prompts": [
-   "기준 이미지(장면1): {name}, {age}, {gender}, outfit, room, lighting를 명시. 장면1 상황 정확 묘사. same character identity, same outfit, same room, same lighting. seed fixed.",
-   "장면2: 장면2 상황. keep the same character, outfit, hairstyle, color palette, background, and lighting as the previous image. same seed as first image.",
-   "장면3: 조력자 등장. 동일 환경. keep the same character, outfit, hairstyle, color palette, background, and lighting. same seed as first image.",
-   "장면4: 대화/제안. 동일 환경. keep the same character... same seed as first image.",
-   "장면5: 시도 장면. 동일 환경. keep the same character... same seed as first image.",
-   "장면6: 성장·미소. 동일 환경. keep the same character... same seed as first image."
+   "기준 이미지(장면1): {name}, {age}, {gender}, outfit, room, lighting를 명시. 장면1 상황 정확 묘사. same character identity, same outfit, same room, same lighting. seed fixed. focus on ability/progress or collection cue, not taste enjoyment.",
+   "장면2: 장면2 상황. keep the same character, outfit, hairstyle, color palette, background, and lighting as the previous image. same seed as first image. focus on ability/progress or collection cue, not taste enjoyment.",
+   "장면3: 조력자 등장. 동일 환경. keep the same character, outfit, hairstyle, color palette, background, and lighting. same seed as first image. focus on ability/progress or collection cue, not taste enjoyment.",
+   "장면4: 대화/제안. 동일 환경. keep the same character... same seed as first image. focus on ability/progress or collection cue, not taste enjoyment.",
+   "장면5: 시도 장면. 동일 환경. keep the same character... same seed as first image. focus on ability/progress or collection cue, not taste enjoyment.",
+   "장면6: 성장·미소. 동일 환경. keep the same character... same seed as first image. focus on ability/progress or collection cue, not taste enjoyment."
  ]
 }}
 """
@@ -121,10 +135,8 @@ def build_prompt(name, age, gender, goal):
 # text plan
 # ─────────────────────────────────
 def safe_json_parse(s: str):
-    # 코드펜스나 잡문 제거
     s = s.strip()
     s = re.sub(r"^```json|^```|```$", "", s, flags=re.MULTILINE).strip()
-    # JSON 시작/끝 추정
     m = re.search(r"\{.*\}\s*$", s, flags=re.DOTALL)
     if m:
         s = m.group(0)
@@ -140,7 +152,6 @@ def generate_plan(name, age, gender, goal):
     )
     txt = rsp.choices[0].message.content
     plan = safe_json_parse(txt)
-    # 정규화
     return {
         "title": plan.get("title",""),
         "protagonist": plan.get("protagonist",""),
@@ -158,7 +169,7 @@ def build_image_prompt(base: str, gs: dict, ref=False):
     outfit = gs.get("outfit","")
     room = gs.get("room","")
     lighting = gs.get("lighting","soft afternoon sunlight")
-    tail = "same character identity, same outfit, same room, same lighting."
+    tail = "same character identity, same outfit, same room, same lighting. focus on ability/progress or collection cue, not taste enjoyment."
     if ref:
         tail += " same seed as first image."
     else:
@@ -172,11 +183,8 @@ def generate_one_image(prompt: str, size="768x768"):
 def generate_images(image_prompts, global_style):
     if not image_prompts:
         return []
-    # 1장 기준
     p0 = build_image_prompt(image_prompts[0], global_style, ref=False)
     img0 = generate_one_image(p0)
-    ref_id = img0["id"]  # 힌트용(동일 시드 개념)
-    # 2~6 병렬
     def task(p):
         return generate_one_image(build_image_prompt(p, global_style, ref=True))
     imgs = [None]*len(image_prompts)
@@ -185,8 +193,7 @@ def generate_images(image_prompts, global_style):
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
             futs = {ex.submit(task, image_prompts[i]): i for i in range(1, len(image_prompts))}
             for f in concurrent.futures.as_completed(futs):
-                i = futs[f]
-                imgs[i] = f.result()
+                i = futs[f]; imgs[i] = f.result()
     return [im["b64"] for im in imgs]
 
 # ─────────────────────────────────
@@ -226,7 +233,6 @@ def generate_full():
     }
     return jsonify(resp)
 
-# 선택: 텍스트만 필요 시
 @app.route("/generate-story", methods=["POST"])
 def generate_story():
     d = request.get_json(force=True)
@@ -245,5 +251,4 @@ def generate_story():
     })
 
 if __name__ == "__main__":
-    # Render: gunicorn 사용 시 무시됨. 로컬 테스트용.
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
