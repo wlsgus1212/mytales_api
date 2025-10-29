@@ -6,12 +6,17 @@ from openai import OpenAI
 import os, json, logging, time, concurrent.futures, re
 
 # ─────────────────────────────────
-# init
+# init & env
 # ─────────────────────────────────
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
     raise RuntimeError("OPENAI_API_KEY not found")
+
+TEXT_MODEL  = os.getenv("TEXT_MODEL",  "gpt-4o-mini")   # gpt-4o | gpt-4o-mini 등
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")   # gpt-image-1
+IMAGE_SIZE  = os.getenv("IMAGE_SIZE",  "1024x1024")     # 1024x1024|1024x1536|1536x1024|auto
+IMG_WORKERS = int(os.getenv("IMG_WORKERS", "3"))        # 동시 이미지 생성 수(기본 3)
 
 client = OpenAI(api_key=API_KEY)
 app = Flask(__name__)
@@ -132,7 +137,7 @@ def build_prompt(name, age, gender, goal):
     )
 
 # ─────────────────────────────────
-# text plan
+# helpers
 # ─────────────────────────────────
 def safe_json_parse(s: str):
     s = s.strip()
@@ -145,7 +150,7 @@ def safe_json_parse(s: str):
 def generate_plan(name, age, gender, goal):
     prompt = build_prompt(name, age, gender, goal)
     rsp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=TEXT_MODEL,
         temperature=0.6,
         max_tokens=900,
         messages=[{"role":"user","content":prompt}]
@@ -161,9 +166,6 @@ def generate_plan(name, age, gender, goal):
         "global_style": plan.get("global_style", {})
     }
 
-# ─────────────────────────────────
-# image gen
-# ─────────────────────────────────
 def build_image_prompt(base: str, gs: dict, ref=False):
     style = gs.get("style","pastel watercolor storybook")
     outfit = gs.get("outfit","")
@@ -176,24 +178,29 @@ def build_image_prompt(base: str, gs: dict, ref=False):
         tail += " seed fixed."
     return f"{base}\n{style}, outfit: {outfit}, room: {room}, lighting: {lighting}.\n{tail}"
 
-def generate_one_image(prompt: str, size="768x768"):
-    img = client.images.generate(model="gpt-image-1", prompt=prompt, size=size)
+def generate_one_image(prompt: str, size=None):
+    size = size or IMAGE_SIZE
+    img = client.images.generate(model=IMAGE_MODEL, prompt=prompt, size=size)
     return {"b64": img.data[0].b64_json, "id": img.created}
 
 def generate_images(image_prompts, global_style):
     if not image_prompts:
         return []
+    # 1장(기준)
     p0 = build_image_prompt(image_prompts[0], global_style, ref=False)
-    img0 = generate_one_image(p0)
-    def task(p):
-        return generate_one_image(build_image_prompt(p, global_style, ref=True))
+    img0 = generate_one_image(p0, IMAGE_SIZE)
     imgs = [None]*len(image_prompts)
     imgs[0] = img0
+
+    # 2~N 병렬
     if len(image_prompts) > 1:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        def task(p):
+            return generate_one_image(build_image_prompt(p, global_style, ref=True), IMAGE_SIZE)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=IMG_WORKERS) as ex:
             futs = {ex.submit(task, image_prompts[i]): i for i in range(1, len(image_prompts))}
             for f in concurrent.futures.as_completed(futs):
-                i = futs[f]; imgs[i] = f.result()
+                i = futs[f]
+                imgs[i] = f.result()
     return [im["b64"] for im in imgs]
 
 # ─────────────────────────────────
@@ -201,7 +208,7 @@ def generate_images(image_prompts, global_style):
 # ─────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "text_model": TEXT_MODEL, "image_model": IMAGE_MODEL, "image_size": IMAGE_SIZE})
 
 @app.route("/generate-full", methods=["POST"])
 def generate_full():
@@ -212,6 +219,8 @@ def generate_full():
     gender = str(d.get("gender","여자")).strip()
     goal = d.get("topic") or d.get("goal") or "편식"
     want_images = bool(d.get("generate_images", True))
+
+    log.info(f"generate-full 요청: {name}, {age}, {gender}, {goal}")
 
     plan = generate_plan(name, age, gender, goal)
 
@@ -251,4 +260,5 @@ def generate_story():
     })
 
 if __name__ == "__main__":
+    # Render에서는 gunicorn 사용; 로컬 테스트용
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
