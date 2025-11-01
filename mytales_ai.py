@@ -1,446 +1,395 @@
-# mytales_ai.py
-
+import sys
+import os
+import re
+import json
+import time
+import random
+import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from openai import OpenAI
 from dotenv import load_dotenv
-import os
-import time
-import logging
-import re
+from openai import OpenAI
 
-# ─────────────────────
-# 환경 설정
-# ─────────────────────
+# ── 환경 ─────────────────────────────────────────────────────────
 load_dotenv()
-
 API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
-    # 서비스 배포 전 .env 설정 필수
-    # mock 모드만 쓸 거면 여기서 죽이지 않고 넘어가도 됨
-    logging.warning("OPENAI_API_KEY not found. Only mock mode will work.")
-client = OpenAI(api_key=API_KEY) if API_KEY else None
+    raise RuntimeError("OPENAI_API_KEY not found. Check .env or environment variables.")
 
-app = Flask(__name__)
-CORS(app)
-
+# 로그 출력 고정(표준출력)
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s:%(message)s"
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(levelname)s:%(name)s:%(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("mytales")
 
-# ─────────────────────
-# 금지 결말 패턴 필터
-# 직접 해결/즉시 교정/즉시 착해짐/즉시 화해 등을 막는다
-# ─────────────────────
-BANNED_PATTERNS = [
-    "맛있었", "괜찮았어요", "이제 혼자서 잘 해요",
-    "짜증을 안 내", "짜증을 안냈", "짜증을 참았", "짜증을 참고",
-    "화해해서 행복했어요", "둘은 다시는 싸우지 않았어요",
-    "착한 아이가 되었어요", "칭찬을 받았어요",
-    "엄마가 칭찬했어요", "엄마가 기뻐했어요",
-    "아빠가 칭찬했어요", "선생님이 칭찬했어요",
-    "다시는 안 그랬어요"
-]
+# OpenAI 클라이언트
+OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "120"))
+OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "1"))
+STORY_MODEL_PREVIEW = os.getenv("STORY_MODEL_PREVIEW", "gpt-4o-mini")
+STORY_MODEL_FULL = os.getenv("STORY_MODEL_FULL", "gpt-4o")
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "dall-e-3")
+SUPPORTED_IMG_SIZES = {"1024x1024", "1792x1024", "1024x1792"}
+IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024")
+if IMAGE_SIZE not in SUPPORTED_IMG_SIZES:
+    IMAGE_SIZE = "1024x1024"
 
-def violates_banned_resolution(story_text: str) -> bool:
-    if not story_text:
-        return False
-    for pat in BANNED_PATTERNS:
-        if pat in story_text:
-            return True
-    return False
+client = OpenAI(api_key=API_KEY, timeout=OPENAI_TIMEOUT, max_retries=OPENAI_MAX_RETRIES)
 
-# ─────────────────────
-# 프롬프트 템플릿
-# 설명:
-# - 어떤 훈육 주제든 적용 가능
-# - 해결을 "바로 행동 교정 성공"으로 끝내지 말고
-#   상징/상상/감각/뱃지 같은 간접 보상으로 마무리
-# - 각 scene은 text와 image_guide를 동시에 낸다
-# - image_guide 안에 캐릭터 외형, 옷, 조명, 공간, 포즈, 감정까지 고정
-# - must_keep은 다음 장면에서도 유지해야 하는 시각적 요소
-#   (캐릭터 얼굴/머리/옷/팔레트/조명 등)
-# - 한 문장은 짧게. 어려운 단어 금지.
-# - 부모의 설교나 "하지마" 금지.
-# - 부모 칭찬 엔딩 금지.
-# - 직접적 해결 선언 금지.
-# 출력은 반드시 유효한 JSON 형태로.
-# ─────────────────────
-PROMPT_TEMPLATE = """
-너는 5~9세 어린이를 위한 훈육 중심 감성 동화 작가이자 그림책 연출가다.
-입력 정보:
-- 아이 이름: {name}
-- 나이: {age}살
-- 성별: {gender}아이
-- 훈육 주제: {goal}
+# ── 앱 ───────────────────────────────────────────────────────────
+app = Flask(__name__)
+# CORS 설정 - 모든 도메인에서 접근 허용
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"]
+    }
+})
 
-목표:
-- 아이를 혼내지 않는다.
-- "하지 마" "그만해" 같은 직접 통제 금지.
-- 부모의 칭찬으로 끝내지 않는다.
-- "바로 고쳐졌어요" 같은 즉시 해결 금지.
-- 대신 아이가 새로운 느낌, 이미지, 상상, 상징적 보상을 얻게 한다.
-  예: 조용히 숨을 쉬면 짜증 요정이 잠든다.
-      채소를 한입 보면 눈 속에 반짝 게이지가 생긴다.
-      친구와 싸우면 싸움 괴물이 꿈에 나타나서 시끄럽다 등.
-- 아이는 "다음에 또 해볼까?" 또는 "이건 내가 가진 힘일 수도 있어" 수준의
-  조용한 호기심으로 마무리한다.
-- 두려움 공포 협박식 표현 금지. 무서운 벌 금지.
-- 너무 어려운 단어 금지. 몸짓/표정으로 감정 표현.
+@app.route("/", methods=["GET", "OPTIONS"])
+def root():
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True}), 200
+    return jsonify({"ok": True, "ts": time.time()})
 
-장면 구성 규칙:
-- 총 6장면.
-- 장면1: 공감. 아이가 실제로 느끼는 불편함, 짜증, 거부감, 마음 상태.
-- 장면2: 고립. 혼자 속상하거나 생각하는 순간.
-- 장면3: 조력자 등장. (성별에 따른 선호 반영. 여자아이면 요정/작은 동물/별/꽃/인형.
-  남자아이면 로봇/공룡/번개 요정/탈것/하늘 새 등)
-  조력자는 명령하지 않고 "같이 보자" "나는 이런 걸 봤어" 식으로 제안.
-- 장면4: 상징적 제안. 조력자가 특별한 비유나 힘을 알려준다
-  (예: 숨을 천천히 쉬면 마음 안의 붉은 불꽃이 작아진다,
-        당근은 눈 속에 반짝힘 게이지를 채운다 등)
-- 장면5: 아이의 작은 시도. 아주 작은 행동. 완벽하지 않아도 된다.
-  결과를 "성공"이라 부르지 말고, "몸에서 조금 다른 느낌"으로 묘사.
-- 장면6: 여운. 아직 문제는 100% 안 끝났다. 하지만 아이 안에
-  새로운 상징(뱃지, 빛, 조용한 힘)이 생겼다. 그걸 아이가 알아챈다.
-  부모 칭찬 없이 아이 스스로 느끼는 조용한 만족감.
+# ── 유틸 ─────────────────────────────────────────────────────────
+def clean_text(s: str) -> str:
+    return re.sub(r'[\"<>]', '', (s or "")).strip()
 
-문체 규칙:
-- 5~9세가 이해 가능한 말.
-- 추상어 금지. (예: "성실", "인내심", "배려" 이런 단어 쓰지 말기)
-- 감정은 행동/표정으로만. ("화났다" 대신 "입이 꾹 다물렸어요. 볼이 빨갰어요.")
-- 한 문장은 짧게. 부드럽게.
-- 과격/공포/혐오 묘사 금지.
-- 거친 폭력 금지.
-- "너는 나쁜 아이가 아니야" "착한 아이지" 같은 도덕 라벨 금지.
+def count_self_choice_indicators(text: str) -> int:
+    indicators = [
+        "한 번","한입","한 입","냄새","손끝","손가락","스스로",
+        "직접","시도","골라","골라보다","조심스레","조심히","다시 한 번","다시 한입"
+    ]
+    return sum(text.count(ind) for ind in indicators)
 
-이미지 연출 가이드:
-- 우리는 장면마다 그림도 만들 것이다.
-- 그래서 각 장면마다 "image_guide"를 함께 만든다.
-- image_guide는 수채화 풍 그림 한 장에 들어갈 요소를 구체적으로 쓴다.
-- 아이의 머리 모양, 옷, 조명, 방/장소를 반복해서 일관되게 써라.
-- 매 장면마다 같은 아이, 같은 옷, 같은 헤어, 같은 색감.
-- 톤: 파스텔 수채화 그림책.
-- 잔혹하거나 무서운 표현 금지.
-- 인체는 자연스럽고 건강하게.
-
-전역 비주얼( global_visual ):
-- hair: 아이 머리 스타일과 색
-- outfit: 아이 옷
-- palette: 전체 색감 (예 "soft orange and teal")
-- lighting: 빛 분위기 (예 "부드러운 저녁 부엌 조명", "따뜻한 오후 햇살")
-- location_base: 주 배경 공간 (예 "식탁 있는 주방", "아이 방 바닥에 앉아 있는 장난감 주변")
-이 전역 비주얼은 모든 장면이 공유해야 한다.
-
-각 장면 정보 형식:
-- "text": 아이에게 읽어줄 짧은 동화 문단. 40~80자 정도. 문장 여러 개 가능.
-- "image_guide": 그 장면 그림에 들어갈 구체 묘사. 누가 어디 앉아 있는지, 표정, 손, 주변 사물, 조력자 위치.
-- "must_keep": 반복 유지해야 할 시각 요소들. hair, outfit, palette, lighting 은 반드시 포함.
-
-엔딩:
-- 부모 칭찬 없음.
-- "다시는 안 그랬어요" 금지.
-- "이제 잘 해요" 금지.
-- 그냥 아이가 자기 안에 새로 생긴 감각이나 작은 힘을 살짝 느끼는 상태.
-
-출력 형식:
-아래 JSON 형식 그대로 출력해라. 불필요한 설명 금지. 키 이름 바꾸지 마라.
-
-{{
- "title": "동화 제목",
- "protagonist": "{name} ({age}살 {gender}아이)",
- "global_visual": {{
-   "hair": "예: 갈색 곱슬 단발",
-   "outfit": "예: 노란 셔츠와 파란 멜빵",
-   "palette": "예: soft orange and teal",
-   "lighting": "예: 따뜻한 부엌 불빛",
-   "location_base": "예: 식탁 있는 주방"
- }},
- "scenes": [
-   {{
-     "text": "장면1(공감).",
-     "image_guide": "장면1 그림 설명.",
-     "must_keep": {{
-       "hair": "...",
-       "outfit": "...",
-       "palette": "...",
-       "lighting": "...",
-       "location": "..."
-     }}
-   }},
-   {{
-     "text": "장면2(고립).",
-     "image_guide": "장면2 그림 설명.",
-     "must_keep": {{
-       "hair": "...",
-       "outfit": "...",
-       "palette": "...",
-       "lighting": "...",
-       "location": "..."
-     }}
-   }},
-   {{
-     "text": "장면3(조력자 등장).",
-     "image_guide": "장면3 그림 설명.",
-     "must_keep": {{
-       "hair": "...",
-       "outfit": "...",
-       "palette": "...",
-       "lighting": "...",
-       "location": "..."
-     }}
-   }},
-   {{
-     "text": "장면4(상징 제안).",
-     "image_guide": "장면4 그림 설명.",
-     "must_keep": {{
-       "hair": "...",
-       "outfit": "...",
-       "palette": "...",
-       "lighting": "...",
-       "location": "..."
-     }}
-   }},
-   {{
-     "text": "장면5(아이의 작은 시도).",
-     "image_guide": "장면5 그림 설명.",
-     "must_keep": {{
-       "hair": "...",
-       "outfit": "...",
-       "palette": "...",
-       "lighting": "...",
-       "location": "..."
-     }}
-   }},
-   {{
-     "text": "장면6(여운).",
-     "image_guide": "장면6 그림 설명.",
-     "must_keep": {{
-       "hair": "...",
-       "outfit": "...",
-       "palette": "...",
-       "lighting": "...",
-       "location": "..."
-     }}
-   }}
- ],
- "ending": "조용한 여운. 직접 해결 선언 금지."
-}}
-"""
-
-# ─────────────────────
-# OpenAI 호출 유틸
-# ─────────────────────
-def call_gpt_story(name, age, gender, goal, max_retries=2):
-    """
-    GPT에게 story+image_guide까지 한 번에 받아온다.
-    금지 결말 패턴 검증. 필요하면 한 번 재시도.
-    반환: dict (이미 JSON 파싱된 형태 기대. 파싱 실패하면 빈 값)
-    """
-    if not client:
+def ensure_character_profile(obj):
+    if not obj:
         return None
-
-    last_result_text = None
-    for attempt in range(max_retries):
-        start_t = time.time()
-
-        prompt = PROMPT_TEMPLATE.format(
-            name=name,
-            age=age,
-            gender=gender,
-            goal=goal,
-        )
-
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",  # 속도/비용 밸런스. 필요시 상향 가능.
-            temperature=0.7,
-            max_tokens=1800,
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
-
-        raw_text = resp.choices[0].message.content.strip()
-        took = round(time.time() - start_t, 2)
-        logger.info(f"GPT story gen {attempt+1} try {took}s")
-
-        # 필터 검사
-        if not violates_banned_resolution(raw_text):
-            last_result_text = raw_text
-            break
-        else:
-            logger.info("banned resolution detected. retrying...")
-
-        last_result_text = raw_text
-
-    # raw_text는 JSON 문자열 형태여야 한다.
-    # 안전하게 JSON 파싱 시도.
-    import json
-    try:
-        parsed = json.loads(last_result_text)
-    except Exception as e:
-        logger.warning(f"JSON parse fail: {e}")
-        parsed = {}
-
-    return parsed
-
-
-def call_image_generation(image_guide, must_keep, global_visual):
-    """
-    한 장면 이미지를 생성.
-    must_keep과 global_visual 정보를 합쳐서 DALL·E 계열 모델에 프롬프트.
-    base64 data URL 반환.
-    """
-    if not client:
-        return None
-
-    # 전역 비주얼에서 안전하게 값 뽑기
-    hair = (must_keep.get("hair") or global_visual.get("hair") or "")
-    outfit = (must_keep.get("outfit") or global_visual.get("outfit") or "")
-    palette = (must_keep.get("palette") or global_visual.get("palette") or "")
-    lighting = (must_keep.get("lighting") or global_visual.get("lighting") or "")
-    location = (must_keep.get("location") or global_visual.get("location_base") or global_visual.get("location") or "")
-
-    # 이미지 프롬프트
-    full_prompt = (
-        f"pastel watercolor storybook illustration. "
-        f"soft gentle tone. palette: {palette}. lighting: {lighting}. "
-        f"same child every scene. hair: {hair}. outfit: {outfit}. "
-        f"main location: {location}. "
-        f"scene detail: {image_guide}. "
-        f"keep proportions childlike and kind. no scary content. "
-        f"do not add new characters that are not described."
-    )
-
-    start_t = time.time()
-    img_resp = client.images.generate(
-        model="dall-e-3",
-        prompt=full_prompt,
-        size="1024x1024",
-        n=1
-    )
-    took = round(time.time() - start_t, 2)
-    logger.info(f"image gen took {took}s")
-
-    # DALL·E 3 응답은 base64 data URL 또는 url 중 하나.
-    # openai.Images.generate (dall-e-3) 보통 data[0].b64_json 제공.
-    b64_data = img_resp.data[0].b64_json
-    data_url = f"data:image/png;base64,{b64_data}"
-    return data_url
-
-
-# ─────────────────────
-# 라우트: /generate-story
-# - 텍스트+장면별 image_guide까지만 만든다
-# - 이미지 자체는 생성 안 함
-# - mock: true 면 과금 없이 가짜 JSON을 돌려준다
-# ─────────────────────
-@app.route("/generate-story", methods=["POST"])
-def generate_story():
-    payload = request.get_json() or {}
-
-    name = str(payload.get("name", "")).strip() or "아이"
-    age = str(payload.get("age", "")).strip() or "6"
-    gender = str(payload.get("gender", "")).strip() or "아이"
-    goal = str(payload.get("topic", "")).strip() or "감정 다루기"
-    mock_mode = bool(payload.get("mock", False))
-
-    logger.info(f"generate-story: {name}, {age}, {gender}, {goal}, mock={mock_mode}")
-
-    # mock 모드: OpenAI 호출 없이 구조만 검증
-    if mock_mode or not client:
-        fake = {
-            "title": f"{name}의 작은 연습 이야기",
-            "protagonist": f"{name} ({age}살 {gender}아이)",
-            "global_visual": {
-                "hair": "갈색 곱슬 단발",
-                "outfit": "노란 셔츠와 파란 멜빵",
-                "palette": "soft orange and teal",
-                "lighting": "부드러운 저녁 불빛",
-                "location_base": "식탁 있는 주방"
-            },
-            "scenes": [
-                {
-                    "text": f"{name}는 오늘 {goal} 때문에 입을 꾹 다물었어요. 볼이 빨갰어요.",
-                    "image_guide": f"{name}가 식탁에 앉아 팔짱. 부드러운 주황빛 조명. 작은 요정이 접시 옆에서 서서 두 손을 허리에 올림.",
-                    "must_keep": {
-                        "hair": "갈색 곱슬 단발",
-                        "outfit": "노란 셔츠와 파란 멜빵",
-                        "palette": "soft orange and teal",
-                        "lighting": "부드러운 저녁 불빛",
-                        "location": "식탁 있는 주방"
-                    }
-                }
-            ] + [
-                {
-                    "text": f"{name}는 조용히 생각했어요. 마음 안에 작은 불빛이 켜졌어요.",
-                    "image_guide": f"{name}가 턱을 괴고 생각. 같은 방. 같은 조명. 작은 빛 방울이 옆에 둥실.",
-                    "must_keep": {
-                        "hair": "갈색 곱슬 단발",
-                        "outfit": "노란 셔츠와 파란 멜빵",
-                        "palette": "soft orange and teal",
-                        "lighting": "부드러운 저녁 불빛",
-                        "location": "식탁 있는 주방"
-                    }
-                }
-                for _ in range(5)
-            ],
-            "ending": f"{name}는 자기 안에 남은 조용한 힘을 살짝 느꼈어요."
+    if isinstance(obj, dict):
+        return obj
+    if isinstance(obj, str):
+        s = obj.strip()
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+        m = re.search(r'Canonical\s*Visual\s*Descriptor\s*[:\-]?\s*(.+)', s, re.IGNORECASE)
+        canonical = m.group(1).strip() if m else s
+        return {
+            "name": None,
+            "age": None,
+            "gender": None,
+            "style": canonical,
+            "visual": {
+                "canonical": canonical,
+                "hair": "",
+                "outfit": "",
+                "face": "",
+                "eyes": "",
+                "proportions": ""
+            }
         }
-        return jsonify(fake)
+    return None
 
-    # 실제 모드: GPT 호출
-    story_dict = call_gpt_story(name, age, gender, goal)
-    return jsonify(story_dict)
+# ── 캐릭터 프로필 ────────────────────────────────────────────────
+def generate_character_profile(name: str, age: str, gender: str) -> dict:
+    hair = random.choice(["짧은 갈색 곱슬머리", "긴 검은 생머리", "웨이브 밤색 머리"])
+    outfit = random.choice(["노란 셔츠와 파란 멜빵", "빨간 물방울무늬 원피스", "초록 후드와 베이지 팬츠"])
+    canonical = (
+        f"Canonical Visual Descriptor: {hair}; {outfit}; "
+        f"round face with soft cheeks; warm brown almond eyes; childlike proportions."
+    )
+    profile = {
+        "name": name,
+        "age": age,
+        "gender": gender,
+        "style": f"{hair}, 착용: {outfit}",
+        "visual": {
+            "canonical": canonical,
+            "hair": hair,
+            "outfit": outfit,
+            "face": "부드러운 볼의 둥근 얼굴",
+            "eyes": "따뜻한 갈색 아몬드형 눈",
+            "proportions": "아이 같은 비율"
+        }
+    }
+    logger.info(f"캐릭터: {profile}")
+    return profile
 
+# ── 스토리 생성 ─────────────────────────────────────────────────
+def generate_story_text(name: str, age: str, gender: str, topic: str, cost_mode: str = "preview", max_attempts: int = 2):
+    model = STORY_MODEL_PREVIEW if cost_mode != "full" else STORY_MODEL_FULL
+    temperature = 0.2 if cost_mode == "preview" else 0.35
+    max_tokens = 900 if cost_mode == "preview" else 1200
 
-# ─────────────────────
-# 라우트: /generate-image
-# - 특정 장면 하나만 이미지로 변환
-# - 프런트에서 scene의 image_guide / must_keep / global_visual 넘겨줘야 한다
-# - mock: true 면 placeholder URL 반환
-# ─────────────────────
-@app.route("/generate-image", methods=["POST"])
-def generate_image():
-    payload = request.get_json() or {}
+    prompt = f"""
+너는 5~9세 어린이를 위한 따뜻하고 리듬감 있는 한국어 동화 작가다.
+JSON만 반환:
+{{"title":"", "character":"", "chapters":[{{"title":"", "paragraph":"", "illustration":""}}], "ending":""}}
 
-    mock_mode = bool(payload.get("mock", False))
-    image_guide = payload.get("image_guide", "")
-    must_keep = payload.get("must_keep", {}) or {}
-    global_visual = payload.get("global_visual", {}) or {}
+요구:
+- 입력: 이름={name}, 나이={age}, 성별={gender}, 훈육주제={topic}
+- 구조: 발단→전개→절정→결말 흐름의 5챕터
+- 각 챕터 2~4문장, 대사/행동/감각으로 보여주기, 설교 금지
+- 의인화된 '훈육 화신'과 조력자 등장
+- 각 챕터 1문장 삽화 설명(텍스트/말풍선 금지)
+- 정확한 스키마로만 반환
+""".strip()
 
-    logger.info(f"generate-image request. mock={mock_mode}")
+    for attempt in range(max_attempts):
+        try:
+            res = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a Korean children's story writer. Return only valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"}
+            )
+            raw = res.choices[0].message.content.strip()
+            cleaned = re.sub(r'```(?:json)?', '', raw).strip()
+            data = None
+            try:
+                data = json.loads(cleaned)
+            except Exception:
+                m = re.search(r'(\{[\s\S]*\})\s*$', cleaned)
+                data = json.loads(m.group(1)) if m else None
 
-    if mock_mode or not client:
-        # placeholder (무료 테스트용)
-        return jsonify({
-            "image_data_url": "https://placehold.co/600x600?text=Scene+Preview"
-        })
+            if isinstance(data, dict) and isinstance(data.get("chapters"), list) and len(data["chapters"]) >= 5:
+                full_text = " ".join([c.get("paragraph", "") for c in data["chapters"]])
+                if count_self_choice_indicators(full_text) >= 1:
+                    return data
+        except Exception as e:
+            logger.warning(f"스토리 시도 실패: {e}")
+            time.sleep(0.3)
 
-    img_data_url = call_image_generation(
-        image_guide=image_guide,
-        must_keep=must_keep,
-        global_visual=global_visual
+    # fallback
+    title = f"{name}의 작은 모험"
+    chapters = [
+        {"title": "1. 시작", "paragraph": f"{name}은(는) 새로운 접시에 낯설어했어요.", "illustration": "밝은 부엌에서 접시를 바라보는 아이"},
+        {"title": "2. 친구 등장", "paragraph": "말하는 당근이 수줍게 인사했어요.", "illustration": "웃는 당근 친구와 아이"},
+        {"title": "3. 첫 시도", "paragraph": "아이는 손끝으로 살짝 만져보았어요.", "illustration": "포크를 조심스레 드는 손"},
+        {"title": "4. 제안", "paragraph": "호박 요정이 작은 게임을 제안했어요.", "illustration": "호박 요정이 손짓하는 모습"},
+        {"title": "5. 선택", "paragraph": "아이의 접시에서 다시 한입의 용기가 났어요.", "illustration": "창가에서 포크를 든 아이"}
+    ]
+    return {"title": title, "character": f"{name} ({age} {gender})", "chapters": chapters, "ending": "입가에 작은 미소가 번졌어요."}
+
+# ── 장면 묘사 + 이미지 프롬프트 ────────────────────────────────
+def describe_scene_kor(scene_text: str, character_profile: dict, scene_index: int, previous_summary: str) -> str:
+    try:
+        prompt = f"""
+이전 내용: {previous_summary}
+현재 장면: {scene_text}
+캐릭터 외형: {character_profile.get('visual', {}).get('canonical')}
+
+한 문장으로 감정, 행동, 배경, 조명을 포함한 시각 묘사만 작성.
+텍스트/말풍선 금지.
+""".strip()
+        res = client.chat.completions.create(
+            model=STORY_MODEL_PREVIEW,
+            messages=[
+                {"role": "system", "content": "Write concise visual descriptions for Korean children's picture books."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=160,
+        )
+        return clean_text(res.choices[0].message.content)
+    except Exception as e:
+        logger.warning(f"묘사 실패: {e}")
+        return f"{scene_text[:100]} ... 따뜻한 조명, 수채화 느낌."
+
+def build_image_prompt_kor(scene_sentence: str, character_profile: dict, scene_index: int, previous_meta=None) -> str:
+    canonical = character_profile.get('visual', {}).get('canonical') or ""
+    style = "부드러운 수채화 스타일; 따뜻한 조명; 아동 친화적 톤; 밝고 순한 색감"
+    return (
+        f"{canonical} 장면 {scene_index}: {scene_sentence}. "
+        f"{style}. 캐릭터 외형(머리/눈/옷/비율) 절대 변경 금지. 텍스트/말풍선 없음."
     )
 
-    return jsonify({
-        "image_data_url": img_data_url
-    })
+# ── 6장면 스토리 생성 (프론트엔드용) ─────────────────────────────
+def generate_6scenes_story(name: str, age: str, gender: str, topic: str, max_attempts: int = 2):
+    """6개 장면으로 구성된 스토리 생성. 프론트엔드 호환 형식."""
+    model = STORY_MODEL_PREVIEW
+    temperature = 0.2
+    max_tokens = 1200
 
+    prompt = f"""
+너는 5~9세 어린이를 위한 따뜻하고 리듬감 있는 한국어 동화 작가다.
+JSON만 반환:
+{{"title":"", "scenes":[{{"text":""}}], "ending":""}}
 
-# ─────────────────────
-# 헬스체크
-# ─────────────────────
+요구:
+- 입력: 이름={name}, 나이={age}, 성별={gender}, 훈육주제={topic}
+- 정확히 6개 장면(scenes 배열)
+- 각 장면 text는 40~80자, 짧게 2~4문장
+- 장면 흐름: 1.공감 → 2.고립 → 3.조력자 → 4.상징 → 5.시도 → 6.여운
+- 어려운 단어 금지. 감정은 행동/표정으로 표현
+- 설교 금지. 부모 칭찬 엔딩 금지
+- "다시는 안 그랬어요" 금지
+- 정확한 스키마로만 반환
+""".strip()
+
+    for attempt in range(max_attempts):
+        try:
+            res = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a Korean children's story writer. Return only valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"}
+            )
+            raw = res.choices[0].message.content.strip()
+            cleaned = re.sub(r'```(?:json)?', '', raw).strip()
+            data = None
+            try:
+                data = json.loads(cleaned)
+            except Exception:
+                m = re.search(r'(\{[\s\S]*\})\s*$', cleaned)
+                data = json.loads(m.group(1)) if m else None
+
+            if isinstance(data, dict) and isinstance(data.get("scenes"), list) and len(data["scenes"]) >= 6:
+                return data
+        except Exception as e:
+            logger.warning(f"스토리 시도 실패: {e}")
+            time.sleep(0.3)
+
+    # fallback
+    title = f"{name}의 작은 모험"
+    scenes = [
+        {"text": f"{name}은(는) {topic} 때문에 입을 꾹 다물었어요. 볼이 빨갰어요."},
+        {"text": f"{name}는 혼자 마루에 앉아 작은 숨을 내쉬었어요."},
+        {"text": "작은 요정이 접시 옆에서 두 손을 허리에 올리고 있었어요."},
+        {"text": "요정이 작은 빛구슬을 손바닥에 올려놓았어요."},
+        {"text": f"{name}는 살짝 구슬을 만져보았어요. 따뜻했어요."},
+        {"text": f"{name}는 자기 안에 작은 힘이 생겼다고 느꼈어요."}
+    ]
+    return {"title": title, "scenes": scenes, "ending": "입가에 작은 미소가 번졌어요."}
+
+# ── API: /generate-full (프론트엔드용) ───────────────────────────
+@app.route("/generate-full", methods=["POST", "OPTIONS"])
+def api_generate_full():
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True}), 200
+    
+    try:
+        data = request.get_json(force=True) or {}
+        name = (data.get("name") or "").strip()
+        age = (data.get("age") or "").strip()
+        gender = (data.get("gender") or "").strip()
+        topic = (data.get("topic") or data.get("education_goal") or "").strip()
+
+        if not all([name, age, gender, topic]):
+            return jsonify({"error": "name, age, gender, topic 모두 필요"}), 400
+
+        story_data = generate_6scenes_story(name, age, gender, topic)
+        return jsonify(story_data)
+    except Exception as e:
+        logger.exception("스토리 생성 중 오류")
+        return jsonify({"error": "서버 오류 발생", "detail": str(e)}), 500
+
+# ── API: /generate-story ─────────────────────────────────────────
+@app.route("/generate-story", methods=["POST", "OPTIONS"])
+def api_generate_story():
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True}), 200
+    
+    try:
+        data = request.get_json(force=True) or {}
+        name = (data.get("name") or "").strip()
+        age = (data.get("age") or "").strip()
+        gender = (data.get("gender") or "").strip()
+        topic = (data.get("topic") or data.get("education_goal") or "").strip()
+        cost_mode = (data.get("cost_mode") or "preview").lower()
+
+        if not all([name, age, gender, topic]):
+            return jsonify({"error": "name, age, gender, topic 모두 필요"}), 400
+
+        character_profile = generate_character_profile(name, age, gender)
+        story_data = generate_story_text(name, age, gender, topic, cost_mode=cost_mode)
+
+        chapters = story_data.get("chapters", [])
+        image_descriptions, image_prompts = [], []
+        accumulated = ""
+
+        for idx, ch in enumerate(chapters, start=1):
+            para = ch.get("paragraph", "")
+            prev = accumulated or "이야기 시작"
+            desc = describe_scene_kor(para, character_profile, idx, prev)
+            prompt = build_image_prompt_kor(desc, character_profile, idx)
+            image_descriptions.append(desc)
+            image_prompts.append(prompt)
+            accumulated += (" " + para) if para else accumulated
+
+        return jsonify({
+            "title": story_data.get("title"),
+            "character_profile": character_profile,
+            "story_paragraphs": [c.get("paragraph", "") for c in chapters],
+            "image_descriptions": image_descriptions,
+            "image_prompts": image_prompts,
+            "ending": story_data.get("ending", ""),
+            "cost_mode": cost_mode
+        })
+    except Exception as e:
+        logger.exception("스토리 생성 중 오류")
+        return jsonify({"error": "서버 오류 발생", "detail": str(e)}), 500
+
+# ── API: /generate-image ─────────────────────────────────────────
+@app.route("/generate-image", methods=["POST", "OPTIONS"])
+def api_generate_image():
+    if request.method == "OPTIONS":
+        return jsonify({"ok": True}), 200
+    
+    try:
+        data = request.get_json(force=True) or {}
+        character_profile = ensure_character_profile(data.get("character_profile"))
+        scene_description = data.get("image_description") or ""
+        scene_index = int(data.get("scene_index") or 1)
+
+        if not character_profile or not scene_description:
+            return jsonify({"error": "character_profile 및 image_description 필요"}), 400
+
+        prompt = build_image_prompt_kor(scene_description, character_profile, scene_index)
+        logger.info(f"이미지 생성 {scene_index}: {prompt[:140]}...")
+
+        res = client.images.generate(
+            model=IMAGE_MODEL,
+            prompt=prompt,
+            size=IMAGE_SIZE,
+            n=1
+        )
+        url = res.data[0].url if res and res.data else None
+        if not url:
+            raise ValueError("이미지 응답에 URL 없음")
+        return jsonify({"image_url": url, "prompt_used": prompt})
+    except Exception as e:
+        logger.exception("이미지 생성 실패")
+        return jsonify({"error": "이미지 생성 실패", "detail": str(e)}), 500
+
+# ── 헬스/진단 ───────────────────────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({
+        "status": "healthy",
+        "timestamp": time.time(),
+        "story_model_preview": STORY_MODEL_PREVIEW,
+        "story_model_full": STORY_MODEL_FULL,
+        "image_model": IMAGE_MODEL,
+        "image_size": IMAGE_SIZE,
+        "timeout": OPENAI_TIMEOUT,
+        "retries": OPENAI_MAX_RETRIES
+    })
 
-
-# ─────────────────────
-# 로컬 실행용
-# Render에서는 gunicorn mytales_ai:app 사용
-# ─────────────────────
+# ── 실행 ────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # 개발용 로컬 서버
-    app.run(host="0.0.0.0", port=10000, debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
