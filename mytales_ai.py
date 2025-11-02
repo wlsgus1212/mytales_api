@@ -1,10 +1,11 @@
 # mytales_ai.py
-# MyTales API 최종본 (2025-11-02 수정)
-# - story 생성 (/generate-story)
-# - 장면별 이미지 생성 (/generate-image)
+# MyTales API (2025-11-02)
+# - /generate-story : 동화 JSON 생성
+# - /generate-image : 장면별 일러스트 생성
 # - mock 제거
-# - prompt 포맷 KeyError 해결
-# - 이미지 base64 정상 반환 + URL fallback
+# - 장면 주제 일관성 강제
+# - 단일 컷만 생성하도록 이미지 프롬프트 수정
+# - scene_text 기반으로 이미지와 텍스트 싱크 맞춤
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -46,7 +47,7 @@ logger = logging.getLogger("mytales")
 
 # ─────────────────────────────────
 # 금지 결말 패턴
-# (너무 교육용/완벽 교정식 엔딩 금지)
+# (완벽히 해결/교정 선언형 엔딩 차단)
 # ─────────────────────────────────
 BANNED_PATTERNS = [
     "다시는 안 그랬어요",
@@ -77,7 +78,9 @@ def violates_banned_resolution(story_text: str) -> bool:
 # 입력값 정규화
 # ─────────────────────────────────
 def normalize_gender(g):
-    """아이 성별 표현을 '남자아이' / '여자아이' / '아이'로 정규화"""
+    """
+    성별 표현을 '남자아이' / '여자아이' / '아이' 로 통일
+    """
     raw = (str(g or "").strip()).lower()
     if raw in ["남", "남자", "boy", "male", "m", "남자아이", "남자 아이"]:
         return "남자아이"
@@ -86,7 +89,9 @@ def normalize_gender(g):
     return "아이"
 
 def pick_goal(payload):
-    """어느 키로 들어와도 훈육 주제를 goal로 통일"""
+    """
+    훈육 주제로 들어올 수 있는 여러 키 중 하나만 선택
+    """
     for key in ["topic", "education_goal", "goal", "educationGoalInput"]:
         v = payload.get(key)
         if v:
@@ -95,13 +100,14 @@ def pick_goal(payload):
 
 
 # ─────────────────────────────────
-# 프롬프트 텍스트
-# (format() 충돌 방지를 위해 HEADER/FOOTER 분리)
+# 동화 프롬프트
+# HEADER(format사용) + FOOTER(원형 유지)
 # ─────────────────────────────────
+
 PROMPT_HEADER = """
 너는 5~9세 아이에게 읽어주는 한국어 그림책 작가다.
-너의 임무는 혼내거나 설명하는 게 아니라,
-아이 스스로 "오, 이거 하면 신기하네" 하고 느끼게 만드는 이야기다.
+너의 임무는 혼내거나 설교하는 게 아니라,
+아이 스스로 '어? 이거 해보니까 신기한데?' 하고 느끼게 만드는 이야기다.
 
 입력 정보:
 - 아이 이름: {name}
@@ -112,32 +118,38 @@ PROMPT_HEADER = """
 ────────────────
 전체 톤
 ────────────────
-1. "해야 해", "하지 마" 같은 명령 금지.
-2. "나쁜 행동", "착한 아이", "올바른 선택" 같은 도덕 라벨 금지.
+1. '해야 해', '하지 마' 같은 명령 금지.
+2. '나쁜 행동', '착한 아이', '올바른 선택' 같은 도덕 라벨 금지.
 3. 상담실 말투 금지:
-   "감정 조절", "훈육", "행동을 통제", "문제 행동", "잘 관리했어요",
-   "습관 형성", "인내심", "책임감", "공감", "자신감"
+   '감정 조절', '훈육', '행동을 통제', '문제 행동', '잘 관리했어요',
+   '습관 형성', '인내심', '책임감', '공감', '자신감'
 4. 게임/스킬 말투 금지:
-   "레벨업", "미션", "점수", "게이지", "기술", "스킬", "업그레이드"
+   '레벨업', '미션', '점수', '게이지', '기술', '스킬', '업그레이드'
 5. 어려운 추상어 금지:
-   "내면", "감정 상태", "해결책", "관계", "조절", "통제", "스트레스"
-6. 무섭게 벌 주거나 겁 주는 전개 금지.
-   귀여운 장난처럼 느껴져야 한다. (먼지 악당은 콜록가루 뿌리지만 우스워야 한다)
+   '내면', '감정 상태', '해결책', '관계', '조절', '통제', '스트레스'
+6. 무섭게 겁주거나 벌 주는 식 금지.
+   위협이나 공포 대신 귀엽고 우스운 표현을 써라.
 
-대신 이렇게 말해.
-- 몸 느낌과 감각으로 표현해.
-  예: "입이 꽉 다물렸어요. 볼이 빨개졌어요. 발끝이 바닥을 톡톡 쳤어요."
-- 아이의 속마음은 아주 짧고 솔직하게.
-  예: "싫어. 그냥 싫어."
-- 과학적 사실은 상상 장면으로 바꿔서 바로 눈앞에서 일어난 결과처럼 보여줘.
-  예: "당근을 한 입 먹자 창밖 별이 또렷해졌어요."
-  예: "장난감을 주웠더니 먼지 세균 악당이 콜록 하며 도망쳤어요."
-- 이 신기한 변화 때문에 아이가 스스로 조금 더 시도하고 싶어지는 흐름으로.
+대신 이렇게 말해라.
+- 몸 느낌과 표정으로만 표현.
+  예: '입이 꽉 다물렸어요. 볼이 빨개졌어요. 발끝이 바닥을 톡톡 쳤어요.'
+- 속마음은 짧고 솔직하게.
+  예: '싫어. 그냥 싫어.'
+- 과학적 사실은 상상 장면으로 눈앞에서 바로 보이게 만든다.
+  예: '당근을 한 입 먹자 창밖 별이 또렷해졌어요.'
+  예: '장난감을 하나 주우니까 먼지 세균 악당이 콜록 하며 도망갔어요.'
+- 이 변화가 재밌어서 아이가 스스로 한 번 더 시도하고 싶게 만들어라.
 
 엔딩:
-- 아이가 '그 작은 변화'를 자기 것처럼 소중히 여긴다.
-- 부모는 옆에 조용히 있어도 된다. (미소, 머리 쓰다듬기)
-- 하지만 "착하네", "이제 다 됐어", "완벽해졌어", "다시는 안 그랬어요" 같은 말 금지.
+- 아이가 '그 작은 변화'를 자기 물건처럼 마음속에 챙긴다.
+- 부모는 옆에 조용히 있어도 된다. (미소, 머리 쓰다듬기 정도)
+- 하지만 '착하네', '이제 다 됐어', '완벽해졌어', '다시는 안 그랬어요' 같은 말은 절대 금지.
+
+중요:
+- 이번 이야기의 주제는 "{goal}"이다.
+- 1장부터 6장까지 전부 "{goal}"과 직접 연결된 상황만 다룬다.
+- "{goal}"과 관계없는 다른 생활 문제(예: 방 청소, 양치, 잠자리, 숙제 등)는 넣지 않는다.
+- 장면마다 "{goal}"과 연결된 감정, 몸 느낌, 결과만 보여준다.
 
 ────────────────
 이야기 구조 (반드시 이 순서로 6장면)
@@ -145,47 +157,44 @@ PROMPT_HEADER = """
 
 1장. 현실 문제
 - 지금 {name}이 {goal}과 직접 연결된 행동을 하고 있다.
-  (예: 편식 → "당근 싫어." 방청소 → "장난감 바닥에 가득.")
+  (예: 편식 → '당근 싫어.'라고 말하며 고개를 홱 돌린다.)
 - 싫어함 / 귀찮음 / 거부감을 몸짓으로 묘사.
-- "혼나려고 했다" 이런 말 금지.
-- 아이 쪽 속말은 가능. "싫어. 그냥 싫어."
+- '혼나려고 했다' 같은 표현 금지.
+- 아이 속말은 가능. '싫어. 그냥 싫어.'
 
 2장. 불편/작은 위험 등장
 - 그 행동 때문에 생기는 귀찮은 결과를 귀엽게 의인화.
-- 예: 방이 지저분 → 먼지 세균 악당이 콜록 가루를 뿌림 (우스꽝스럽고 약간 바보같이)
-- 예: 채소 거부 → 창밖 불빛이 흐릿해지고, 아이 눈 안의 별이 흐려짐.
-- 무섭지 않게. 장난스럽게.
+- 예: 편식 → 눈이 흐릿해지고 창밖 불빛이 뿌옇게 보여요.
+- 이건 무섭지 않고 장난스럽다.
+- '벌'처럼 들리면 안 된다.
 
 3장. 조력자 등장
-- {gender}아이인 {name} 옆에 작은 동료/친구가 나타난다.
+- {gender}아이인 {name} 옆에 작은 친구가 나타난다.
   - 남자아이면 로봇/작은 공룡/번쩍 새 같은 존재.
   - 여자아이면 꽃 요정/다정한 새/부드러운 별/인형 같은 존재.
   - 성별 애매하면 부드러운 빛 덩어리.
 - 조력자는 명령하지 않는다.
-- "나 이거 해봤는데 진짜 신기했어." / "나는 이런 걸 봤어." 같은 자기 경험만 말한다.
-- 여기서 과학적 사실을 상상으로 연결한다.
-  (당근 → 눈이 또렷 / 청소 → 공기가 맑아짐 / 양치 → 치아 반짝 돌 지킴 등)
+- '나 이거 해봤는데 진짜 신기했어.' / '나는 이런 걸 봤어.' 처럼 자기 경험만 말한다.
+- 여기서 {goal}과 직접 연결된 '작은 시도' 아이디어를 자연스럽게 보여준다.
+  예: '당근을 한 입만 꼭꼭 씹으면 창밖 불빛이 다시 또렷해져.'
 
 4장. 작은 시도
-- {name}이 아주 살짝 따라 한다. (당근 한 입 베어문다 / 장난감 하나 상자에 넣는다 / 칫솔 한 번 슥 문댄다)
-- 그 즉시 상상 속 변화가 눈앞에서 일어난다.
-- 이 변화는 '상'이다. 벌이 아니다.
-- 예: 먼지 악당이 "에취!" 하며 달아난다.
-- 예: 아이 눈 속 별이 다시 반짝 켜진다.
-- "성공했다" / "해결됐다" / "바른 선택" 같은 표현 금지.
-- 대신 "우와… 이거 뭐야?" 같은 놀람을 넣어라.
+- {name}이 아주 살짝 따라 한다.
+- 즉시 귀엽고 신기한 변화가 눈앞에 나타난다.
+  예: 창밖 불빛이 다시 맑아진다.
+- '성공했다', '해결됐다', '바른 선택' 같은 표현 금지.
+- 대신 '우와… 이거 뭐야?' 같은 놀람을 넣어라.
 
 5장. 현실 감각
-- 상상 속 변화가 {name}의 실제 몸 느낌으로도 살짝 이어진다.
-- 예: "코가 시원해졌어요." / "방 공기가 가볍게 느껴졌어요." / "눈이 환해진 것 같았어요."
+- 그 상상 변화가 {name}의 실제 몸 느낌으로도 살짝 이어진다.
+  예: '눈이 맑아진 느낌이 들었어요.' / '입 안이 따뜻했어요.'
 - 아이는 살짝 뿌듯하거나 재미있다.
-- "훈육 성공", "이제 바르게 행동해요" 같은 말은 절대 쓰지 마.
-- 그냥 "조금 좋다" 느낌.
+- '훈육 성공', '이제 바르게 행동해요' 같은 말 금지.
 
 6장. 여운
 - 아직 모든 게 끝난 건 아니다.
 - 그래도 {name}은 그 작고 신기한 변화를 자기 것처럼 마음속에 챙긴다.
-- 부모는 조용히 곁에 있어도 된다. (미소, 머리 쓰다듬기)
+- 부모는 조용히 곁에 있어도 된다. (미소나 가볍게 머리 쓰다듬기)
 - 평가는 금지. 도덕 라벨 금지.
 - 마무리는 조용하고 따뜻하게.
 
@@ -193,16 +202,15 @@ PROMPT_HEADER = """
 문장 스타일
 ────────────────
 - 각 장면은 3~5개의 짧은 문장으로 된 한 단락.
-- 단락 하나는 80~140자 정도. 아이에게 읽어주기 편한 호흡으로.
+- 단락 하나는 80~140자 정도. 아이에게 읽어주기 편한 호흡.
 - 어려운 단어 대신 눈앞 장면, 몸 느낌, 표정, 소리로만 설명.
-- 아이 이름만 계속 반복하지 말고 "그는", "그녀는", "아이" 같은 지칭도 섞어라.
-- 무섭거나 어둡게 하지 말고, 건강하고 따뜻한 몸.
+- 무섭거나 어둡게 하지 말고, 건강하고 따뜻하게.
 
 ────────────────
 그림(일러스트) 규칙
 ────────────────
-- 각 장면마다 "image_guide"를 반드시 넣어.
-- "image_guide"에는 수채화 느낌의 한 장면 구성을 써.
+- 각 장면마다 "image_guide"를 반드시 넣는다.
+- "image_guide"에는 수채화 느낌의 한 장면 구성을 써라.
   - 머리 모양, 옷 색, 조명, 방/장소, 손 동작, 표정.
   - 조력자가 어디에 있는지.
 - 모든 장면에서 같은 아이, 같은 옷, 같은 색감, 같은 조명을 유지해야 한다.
@@ -235,37 +243,37 @@ PROMPT_FOOTER = r"""
  },
  "scenes": [
    {
-     "text": "1장. 현실 문제.",
+     "text": "1장 내용. 현실 문제 장면.",
      "image_guide": "1장 그림 설명.",
      "must_keep": { "hair": "...", "outfit": "...", "palette": "...", "lighting": "...", "location": "..." }
    },
    {
-     "text": "2장. 불편/작은 위험 등장. 귀엽고 살짝 웃긴 식으로.",
+     "text": "2장 내용. 불편/작은 위험. 무섭지 않고 귀엽다.",
      "image_guide": "2장 그림 설명.",
      "must_keep": { "hair": "...", "outfit": "...", "palette": "...", "lighting": "...", "location": "..." }
    },
    {
-     "text": "3장. 조력자 등장. '명령' 대신 '나 이거 봤어' 톤.",
+     "text": "3장 내용. 조력자 등장. 명령 말투 금지.",
      "image_guide": "3장 그림 설명.",
      "must_keep": { "hair": "...", "outfit": "...", "palette": "...", "lighting": "...", "location": "..." }
    },
    {
-     "text": "4장. 아이의 아주 작은 시도. 그리고 즉시 나타나는 귀엽고 신기한 변화.",
+     "text": "4장 내용. 아이의 아주 작은 시도. 바로 나타나는 신기한 변화.",
      "image_guide": "4장 그림 설명.",
      "must_keep": { "hair": "...", "outfit": "...", "palette": "...", "lighting": "...", "location": "..." }
    },
    {
-     "text": "5장. 그 변화가 몸 느낌으로도 살짝 이어진다.",
+     "text": "5장 내용. 몸으로 느끼는 작은 변화.",
      "image_guide": "5장 그림 설명.",
      "must_keep": { "hair": "...", "outfit": "...", "palette": "...", "lighting": "...", "location": "..." }
    },
    {
-     "text": "6장. 여운. 아이가 그 느낌을 자기 것처럼 조용히 간직한다. 부모는 조용히 곁에 있다.",
+     "text": "6장 내용. 여운. 조용한 만족. 도덕 라벨 금지.",
      "image_guide": "6장 그림 설명.",
      "must_keep": { "hair": "...", "outfit": "...", "palette": "...", "lighting": "...", "location": "..." }
    }
  ],
- "ending": "아이의 조용한 깨달음과 부모의 따뜻한 존재감(미소나 쓰다듬기)은 괜찮지만, 평가나 점수식 칭찬은 절대 금지."
+ "ending": "아이의 조용한 깨달음. 부모는 옆에서 조용히 있다. '착하네' 같은 말 없이 따뜻하게 마무리."
 }
 """
 
@@ -276,16 +284,14 @@ PROMPT_FOOTER = r"""
 def call_gpt_story(name, age, gender_norm, goal, max_retries=2):
     """
     GPT에게 story(json) 생성 요청.
-    금지된 '완벽 교정' 패턴 있으면 한 번 더 재요청.
+    금지된 엔딩 패턴 있으면 한 번 더 재요청.
     JSON 파싱 실패하면 fallback.
     """
-
     last_result_text = None
 
     for attempt in range(max_retries):
         start_t = time.time()
 
-        # format 충돌 피하려고 HEADER만 format하고 FOOTER는 문자열로 붙임
         prompt = PROMPT_HEADER.format(
             name=name,
             age=age,
@@ -313,7 +319,6 @@ def call_gpt_story(name, age, gender_norm, goal, max_retries=2):
             logger.info("[call_gpt_story] banned-style ending detected. retrying...")
             last_result_text = raw_text
 
-    # 파싱 시도
     try:
         parsed = json.loads(last_result_text)
     except Exception as e:
@@ -338,11 +343,16 @@ def call_gpt_story(name, age, gender_norm, goal, max_retries=2):
 # ─────────────────────────────────
 # 이미지 생성
 # ─────────────────────────────────
-def call_image_generation(image_guide, must_keep, global_visual):
+def call_image_generation(image_guide, must_keep, global_visual, scene_text):
     """
     한 장면 이미지를 생성해서 data URL 또는 직접 URL로 반환.
-    1) 가능하면 base64(data URL) 형태로 돌려줌
-    2) 못 받으면 OpenAI가 준 https URL을 그대로 리턴
+
+    강제 조건:
+    - 단일 컷만. 콜라주 금지. 4분할 금지.
+    - 같은 아이를 여러 번 복제해서 여러 장면처럼 그리지 말 것.
+    - 지금 scene_text에 묘사된 '현재 순간'만 그린다.
+    - 다른 장면(과거/미래) 섞지 말 것.
+    - 무섭거나 위협적인 분위기 금지.
     """
 
     hair = (must_keep.get("hair") or global_visual.get("hair") or "")
@@ -357,13 +367,18 @@ def call_image_generation(image_guide, must_keep, global_visual):
     )
 
     full_prompt = (
-        "pastel watercolor children's storybook illustration. "
-        "gentle, warm, safe, kind. "
-        f"palette: {palette}. lighting: {lighting}. "
-        f"same child in every scene. hair: {hair}. outfit: {outfit}. "
-        f"main location: {location}. "
-        f"scene detail: {image_guide}. "
-        "keep proportions childlike. no scary or violent content."
+        "single watercolor illustration for a children's picture book. "
+        "soft warm pastel tone. gentle safe mood. "
+        "only ONE panel. do not split the page. no collage. no grid. no multiple frames. "
+        "the child appears only once. no duplicates of the same child. "
+        "show ONLY the current moment, not before or after.\n"
+        f"scene_text (narration to visualize): {scene_text}\n"
+        f"main child: hair = {hair}, outfit = {outfit}.\n"
+        f"environment/background: {location}.\n"
+        f"lighting: {lighting}. palette: {palette}.\n"
+        f"extra visual detail for this moment: {image_guide}\n"
+        "natural healthy child body proportions. "
+        "no fear. no violence. no scary elements."
     )
 
     start_t = time.time()
@@ -373,32 +388,19 @@ def call_image_generation(image_guide, must_keep, global_visual):
         size="1024x1024",
         quality="standard",
         n=1,
-        response_format="b64_json",  # 핵심 추가: base64 달라고 명시
+        response_format="b64_json",  # base64 직접 받기
     )
     took = round(time.time() - start_t, 2)
     logger.info(f"[call_image_generation] took={took}s")
 
-    # 1순위: base64
-    b64_data = None
-    try:
-        b64_data = img_resp.data[0].b64_json
-    except Exception as e:
-        logger.warning(f"[call_image_generation] no b64_json in response: {e}")
-
+    b64_data = getattr(img_resp.data[0], "b64_json", None)
     if b64_data:
         return f"data:image/png;base64,{b64_data}"
 
-    # 2순위: url fallback
-    img_url = None
-    try:
-        img_url = img_resp.data[0].url
-    except Exception as e:
-        logger.error(f"[call_image_generation] no url in response either: {e}")
-
+    img_url = getattr(img_resp.data[0], "url", None)
     if img_url:
         return img_url
 
-    # 둘 다 없으면 실패
     return None
 
 
@@ -434,6 +436,7 @@ def generate_image():
     image_guide = payload.get("image_guide", "")
     must_keep = payload.get("must_keep", {}) or {}
     global_visual = payload.get("global_visual", {}) or {}
+    scene_text = payload.get("scene_text", "")  # Wix에서 넘겨줘야 함
 
     logger.info(
         "[generate-image] have_image_guide=%s mk_keys=%s gv_keys=%s",
@@ -449,15 +452,13 @@ def generate_image():
         image_guide=image_guide,
         must_keep=must_keep,
         global_visual=global_visual,
+        scene_text=scene_text,
     )
 
     if not img_data_url:
-        # OpenAI 쪽에서 뭔가 막혔거나 실패한 케이스
         return jsonify({"image_data_url": None}), 500
 
-    return jsonify({
-        "image_data_url": img_data_url
-    })
+    return jsonify({"image_data_url": img_data_url})
 
 
 # ─────────────────────────────────
