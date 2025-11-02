@@ -1,5 +1,11 @@
 # mytales_ai.py
-# fixed: prompt .format KeyError (split header/footer)
+# MyTales API 최종본 (2025-11-02 수정)
+# - story 생성 (/generate-story)
+# - 장면별 이미지 생성 (/generate-image)
+# - mock 제거
+# - prompt 포맷 KeyError 해결
+# - 이미지 base64 정상 반환 + URL fallback
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
@@ -40,6 +46,7 @@ logger = logging.getLogger("mytales")
 
 # ─────────────────────────────────
 # 금지 결말 패턴
+# (너무 교육용/완벽 교정식 엔딩 금지)
 # ─────────────────────────────────
 BANNED_PATTERNS = [
     "다시는 안 그랬어요",
@@ -70,6 +77,7 @@ def violates_banned_resolution(story_text: str) -> bool:
 # 입력값 정규화
 # ─────────────────────────────────
 def normalize_gender(g):
+    """아이 성별 표현을 '남자아이' / '여자아이' / '아이'로 정규화"""
     raw = (str(g or "").strip()).lower()
     if raw in ["남", "남자", "boy", "male", "m", "남자아이", "남자 아이"]:
         return "남자아이"
@@ -78,6 +86,7 @@ def normalize_gender(g):
     return "아이"
 
 def pick_goal(payload):
+    """어느 키로 들어와도 훈육 주제를 goal로 통일"""
     for key in ["topic", "education_goal", "goal", "educationGoalInput"]:
         v = payload.get(key)
         if v:
@@ -87,7 +96,7 @@ def pick_goal(payload):
 
 # ─────────────────────────────────
 # 프롬프트 텍스트
-# (중괄호 충돌 방지를 위해 HEAD/FOOTER로 분리)
+# (format() 충돌 방지를 위해 HEADER/FOOTER 분리)
 # ─────────────────────────────────
 PROMPT_HEADER = """
 너는 5~9세 아이에게 읽어주는 한국어 그림책 작가다.
@@ -276,7 +285,7 @@ def call_gpt_story(name, age, gender_norm, goal, max_retries=2):
     for attempt in range(max_retries):
         start_t = time.time()
 
-        # 형식 충돌 막기 위해 여기서 합친다
+        # format 충돌 피하려고 HEADER만 format하고 FOOTER는 문자열로 붙임
         prompt = PROMPT_HEADER.format(
             name=name,
             age=age,
@@ -304,7 +313,7 @@ def call_gpt_story(name, age, gender_norm, goal, max_retries=2):
             logger.info("[call_gpt_story] banned-style ending detected. retrying...")
             last_result_text = raw_text
 
-    # 파싱
+    # 파싱 시도
     try:
         parsed = json.loads(last_result_text)
     except Exception as e:
@@ -330,6 +339,12 @@ def call_gpt_story(name, age, gender_norm, goal, max_retries=2):
 # 이미지 생성
 # ─────────────────────────────────
 def call_image_generation(image_guide, must_keep, global_visual):
+    """
+    한 장면 이미지를 생성해서 data URL 또는 직접 URL로 반환.
+    1) 가능하면 base64(data URL) 형태로 돌려줌
+    2) 못 받으면 OpenAI가 준 https URL을 그대로 리턴
+    """
+
     hair = (must_keep.get("hair") or global_visual.get("hair") or "")
     outfit = (must_keep.get("outfit") or global_visual.get("outfit") or "")
     palette = (must_keep.get("palette") or global_visual.get("palette") or "")
@@ -342,15 +357,13 @@ def call_image_generation(image_guide, must_keep, global_visual):
     )
 
     full_prompt = (
-        "soft pastel watercolor children storybook illustration. "
-        "gentle, warm, kind tone. "
-        f"child hair: {hair}. outfit: {outfit}. "
-        f"color palette: {palette}. lighting: {lighting}. "
+        "pastel watercolor children's storybook illustration. "
+        "gentle, warm, safe, kind. "
+        f"palette: {palette}. lighting: {lighting}. "
+        f"same child in every scene. hair: {hair}. outfit: {outfit}. "
         f"main location: {location}. "
         f"scene detail: {image_guide}. "
-        "same child across scenes. healthy body proportions. "
-        "cozy, safe, not scary, no gore. "
-        "do not introduce new characters that were not described."
+        "keep proportions childlike. no scary or violent content."
     )
 
     start_t = time.time()
@@ -358,14 +371,35 @@ def call_image_generation(image_guide, must_keep, global_visual):
         model="dall-e-3",
         prompt=full_prompt,
         size="1024x1024",
-        n=1
+        quality="standard",
+        n=1,
+        response_format="b64_json",  # 핵심 추가: base64 달라고 명시
     )
     took = round(time.time() - start_t, 2)
     logger.info(f"[call_image_generation] took={took}s")
 
-    b64_data = img_resp.data[0].b64_json
-    data_url = f"data:image/png;base64,{b64_data}"
-    return data_url
+    # 1순위: base64
+    b64_data = None
+    try:
+        b64_data = img_resp.data[0].b64_json
+    except Exception as e:
+        logger.warning(f"[call_image_generation] no b64_json in response: {e}")
+
+    if b64_data:
+        return f"data:image/png;base64,{b64_data}"
+
+    # 2순위: url fallback
+    img_url = None
+    try:
+        img_url = img_resp.data[0].url
+    except Exception as e:
+        logger.error(f"[call_image_generation] no url in response either: {e}")
+
+    if img_url:
+        return img_url
+
+    # 둘 다 없으면 실패
+    return None
 
 
 # ─────────────────────────────────
@@ -397,21 +431,29 @@ def generate_story():
 def generate_image():
     payload = request.get_json() or {}
 
-    image_guide = payload.get("image_guide", "") or ""
+    image_guide = payload.get("image_guide", "")
     must_keep = payload.get("must_keep", {}) or {}
     global_visual = payload.get("global_visual", {}) or {}
 
     logger.info(
-        f"[generate-image] have_image_guide={bool(image_guide)} "
-        f"mk_keys={list(must_keep.keys())} "
-        f"gv_keys={list(global_visual.keys())}"
+        "[generate-image] have_image_guide=%s mk_keys=%s gv_keys=%s",
+        bool(image_guide),
+        list(must_keep.keys()),
+        list(global_visual.keys()),
     )
+
+    if not image_guide:
+        return jsonify({"error": "missing image_guide"}), 400
 
     img_data_url = call_image_generation(
         image_guide=image_guide,
         must_keep=must_keep,
-        global_visual=global_visual
+        global_visual=global_visual,
     )
+
+    if not img_data_url:
+        # OpenAI 쪽에서 뭔가 막혔거나 실패한 케이스
+        return jsonify({"image_data_url": None}), 500
 
     return jsonify({
         "image_data_url": img_data_url
@@ -429,6 +471,7 @@ def health():
 
 # ─────────────────────────────────
 # 로컬 실행
+# Render에서는 gunicorn mytales_ai:app 로 실행
 # ─────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000, debug=True)
