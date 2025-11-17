@@ -1,11 +1,15 @@
 # mytales_ai.py
-# MyTales API (2025-11-02)
-# - /generate-story : 동화 JSON 생성
-# - /generate-image : 장면별 일러스트 생성
-# - mock 제거
-# - 장면 주제 일관성 강제
-# - 단일 컷만 생성하도록 이미지 프롬프트 수정
-# - scene_text 기반으로 이미지와 텍스트 싱크 맞춤
+# MyTales API (2025-11-18, patched)
+# - /score-assessment : 40문항 채점 → 8영역 평균 → 64코드(6축) + 근거(rationale)
+# - /generate-story   : 기존 프롬프트 유지 + 검사 결과/근거를 프롬프트 말미에 주입
+# - /generate-image   : 단일 컷 일러스트 (변경 없음)
+# - /health           : 헬스체크
+#
+# 변경 요지:
+#  1) "검사 해석 로직"을 서버로 이동: 점수→초점도메인 2개→가이드→rationale 텍스트 생성
+#  2) call_gpt_story()가 rationale/cdps_code를 받아 기존 PROMPT 뒤에 [검사 근거] 블록을 추가
+#  3) /generate-story 가 payload.cdps(domain_avg, code 등)을 받아 프롬프트에 반영하고
+#     응답에 story.meta.rationale / meta.focus_domains를 포함
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -15,6 +19,7 @@ import os
 import time
 import logging
 import json
+import re
 
 # ─────────────────────────────────
 # 환경 설정 / 로깅
@@ -50,28 +55,18 @@ logger = logging.getLogger("mytales")
 # (완벽히 해결/교정 선언형 엔딩 차단)
 # ─────────────────────────────────
 BANNED_PATTERNS = [
-    "다시는 안 그랬어요",
-    "이제 혼자서 잘 해요",
-    "완벽하게 해냈어요",
-    "완벽하게 할 수 있었어요",
-    "착한 아이가 되었어요",
-    "나쁜 행동을 하지 않았어요",
-    "엄마가 아주 크게 칭찬했어요",
-    "아빠가 자랑스러워했어요",
-    "선생님이 칭찬했어요",
-    "문제 행동이 사라졌어요",
-    "바르게 행동했어요",
-    "올바르게 행동했어요",
-    "이제 항상 잘해요",
+    r"다시는\s*안\s*그랬[어요|다]",
+    r"이제\s*혼자서\s*잘\s*해[요|졌어요]",
+    r"완벽하게\s*(해냈어요|할\s*수\s*있었어요)",
+    r"착한\s*아이가\s*되었어요",
+    r"나쁜\s*행동이\s*사라졌어요",
+    r"(바르게|올바르게)\s*행동했어요",
+    r"이제\s*항상\s*잘해요",
 ]
-
 def violates_banned_resolution(story_text: str) -> bool:
     if not story_text:
         return False
-    for pat in BANNED_PATTERNS:
-        if pat in story_text:
-            return True
-    return False
+    return any(re.search(p, story_text) for p in BANNED_PATTERNS)
 
 
 # ─────────────────────────────────
@@ -100,8 +95,100 @@ def pick_goal(payload):
 
 
 # ─────────────────────────────────
-# 동화 프롬프트
-# HEADER(format사용) + FOOTER(원형 유지)
+# 검사(40문항) 채점/해석 유틸
+# ─────────────────────────────────
+REVERSE_ITEMS = {8, 9, 13, 14, 22}  # 1~40 역문항
+
+DOMAINS = {
+    "SOC": [1,2,3,4,5],        # 사회성·공감
+    "EMO": [6,7,8,9,10],       # 감정 표현·조절
+    "CON": [11,12,13,14,15],   # 자기조절·집중력
+    "AUT": [16,17,18,19,20],   # 자율성·책임감
+    "RES": [21,22,23,24,25],   # 적응력·회복탄력성
+    "CRE": [26,27,28,29,30],   # 상상력·창의성
+    "COG": [31,32,33,34,35],   # 사고·학습태도
+    "HAB": [36,37,38,39,40],   # 생활 습관·자기관리
+}
+CODE_AXES = ["SOC","EMO","CON","AUT","RES","HAB"]  # 6축 → 64코드
+BIN_THRESHOLD = 2.5
+
+DOMAIN_LABELS = {
+  "SOC":"사회성·공감","EMO":"감정표현·조절","CON":"자기조절·집중력",
+  "AUT":"자율성·책임감","RES":"회복탄력성","CRE":"상상력·창의성",
+  "COG":"사고·학습태도","HAB":"생활습관·자기관리"
+}
+DOMAIN_GUIDE = {
+  "SOC": "친구 상호작용·나눔·차례·경청을 자연스럽게 체험하게 합니다.",
+  "EMO": "감정을 말로 설명하지 않고 표정·몸 느낌으로 드러나며, 잦아드는 작은 신호를 보여줍니다.",
+  "CON": "유혹 지연과 ‘작은 완주 경험’을 재미로 느끼게 합니다.",
+  "AUT": "스스로 선택→작게 책임지는 흐름, 칭찬 대신 조용한 지지를 남깁니다.",
+  "RES": "낯선 상황에서 당황→안정 회복의 짧은 호흡을 반복 경험하게 합니다.",
+  "CRE": "일상 사물 변신·상상 장면으로 시도 자체를 즐겁게 합니다.",
+  "COG": "호기심 단서를 놓고, 다른 방법을 스스로 찾는 순간을 만듭니다.",
+  "HAB": "식사·정리·수면·기기 등 규칙을 ‘편안함/깔끔함’의 몸 느낌으로 체감하게 합니다."
+}
+
+def _assert(cond, msg):
+    if not cond:
+        raise ValueError(msg)
+
+def _coerce_answer(v):
+    MAP = {"①":1,"거의 그렇지 않다":1,"전혀 아니다":1,"1":1,
+           "②":2,"가끔 그렇다":2,"2":2,
+           "③":3,"자주 그렇다":3,"3":3,
+           "④":4,"매우 자주 그렇다":4,"4":4}
+    if isinstance(v, int): return v
+    if isinstance(v, str):
+        s = v.strip()
+        if s in MAP: return MAP[s]
+        if s.isdigit(): return int(s)
+    raise ValueError("invalid answer value")
+
+def score_answers(raw_answers):
+    _assert(isinstance(raw_answers, list), "answers must be array")
+    _assert(len(raw_answers) == 40, "answers length must be 40")
+    coerced = [_coerce_answer(v) for v in raw_answers]
+    for n in coerced: _assert(1 <= n <= 4, "answer out of range")
+    scored = [(5 - v) if (i+1) in REVERSE_ITEMS else v for i, v in enumerate(coerced)]
+    return coerced, scored
+
+def domain_averages(scored):
+    out = {}
+    for k, idxs in DOMAINS.items():
+        vals = [scored[i-1] for i in idxs]
+        out[k] = round(sum(vals)/len(vals), 2)
+    return out
+
+def make_code(averages):
+    bits = [1 if averages[ax] > BIN_THRESHOLD else 0 for ax in CODE_AXES]
+    letters = list("ABCDEF")
+    code = "-".join(f"{letters[i]}{bits[i]}" for i in range(len(CODE_AXES)))
+    return code, bits
+
+def select_focus_domains(domain_avg, k=2):
+    return sorted(domain_avg.items(), key=lambda x: x[1])[:k]
+
+def build_rationale_text(topic, focus):
+    """
+    topic: 훈육 주제 문자열
+    focus: [("HAB", 2.3), ("CON", 2.4)] 형태
+    """
+    lines = []
+    if topic:
+        lines.append(f"선택 주제: {topic}")
+    lines.append("검사 결과 기반 동화 설계 근거:")
+    for key, score in focus:
+        label = DOMAIN_LABELS.get(key, key)
+        guide = DOMAIN_GUIDE.get(key, "")
+        lines.append(f"- {label}({score}): {guide}")
+    lines.append("구성 원리: 1장 현재 몸 느낌 → 작은 시도 → 즉각적이고 안전한 긍정 경험 → 조용한 여운.")
+    lines.append("규칙: 명령/도덕 라벨 금지, 장면당 80~140자, 총 6장 구조.")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────
+# 동화 프롬프트 (기존 HEADER/FOOTER 유지)
+# + 검사 근거 블록을 뒤에 추가 주입
 # ─────────────────────────────────
 
 PROMPT_HEADER = """
@@ -277,35 +364,49 @@ PROMPT_FOOTER = r"""
 }
 """
 
+# 검사 근거(코드/포커스/라셔날)를 프롬프트 말미에 추가하기 위한 보조 텍스트
+def build_assessment_block(cdps_code: str, focus_keys, rationale_text: str) -> str:
+    fk = ", ".join(focus_keys or [])
+    rt = rationale_text or "검사 근거 없음(테스트)."
+    code_str = cdps_code or "없음"
+    return f"""
+[검사 근거]
+- 성향 코드: {code_str}
+- focus_domains: {fk}
+- rationale:
+{rt}
+""".strip()
+
 
 # ─────────────────────────────────
 # GPT 호출
 # ─────────────────────────────────
-def call_gpt_story(name, age, gender_norm, goal, max_retries=2):
+def call_gpt_story(name, age, gender_norm, goal, cdps_code=None, rationale_text=None, focus_keys=None, max_retries=2):
     """
     GPT에게 story(json) 생성 요청.
+    기존 프롬프트(PROMPT_HEADER/FOOTER) 뒤에 검사 근거 블록을 추가 주입.
     금지된 엔딩 패턴 있으면 한 번 더 재요청.
     JSON 파싱 실패하면 fallback.
     """
     last_result_text = None
+    assessment_block = build_assessment_block(cdps_code, focus_keys, rationale_text)
 
     for attempt in range(max_retries):
         start_t = time.time()
 
-        prompt = PROMPT_HEADER.format(
-            name=name,
-            age=age,
-            gender=gender_norm,
-            goal=goal,
-        ) + "\n" + PROMPT_FOOTER
+        prompt = (
+            PROMPT_HEADER.format(name=name, age=age, gender=gender_norm, goal=goal)
+            + "\n"
+            + assessment_block
+            + "\n"
+            + PROMPT_FOOTER
+        )
 
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=0.7,
             max_tokens=2000,
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
+            messages=[{"role": "user", "content": prompt}]
         )
 
         raw_text = (resp.choices[0].message.content or "").strip()
@@ -341,20 +442,12 @@ def call_gpt_story(name, age, gender_norm, goal, max_retries=2):
 
 
 # ─────────────────────────────────
-# 이미지 생성
+# 이미지 생성 (변경 없음)
 # ─────────────────────────────────
 def call_image_generation(image_guide, must_keep, global_visual, scene_text):
     """
     한 장면 이미지를 생성해서 data URL 또는 직접 URL로 반환.
-
-    강제 조건:
-    - 단일 컷만. 콜라주 금지. 4분할 금지.
-    - 같은 아이를 여러 번 복제해서 여러 장면처럼 그리지 말 것.
-    - 지금 scene_text에 묘사된 '현재 순간'만 그린다.
-    - 다른 장면(과거/미래) 섞지 말 것.
-    - 무섭거나 위협적인 분위기 금지.
     """
-
     hair = (must_keep.get("hair") or global_visual.get("hair") or "")
     outfit = (must_keep.get("outfit") or global_visual.get("outfit") or "")
     palette = (must_keep.get("palette") or global_visual.get("palette") or "")
@@ -405,7 +498,70 @@ def call_image_generation(image_guide, must_keep, global_visual, scene_text):
 
 
 # ─────────────────────────────────
-# 라우트: /generate-story
+# 라우트: /score-assessment  (신규)
+# ─────────────────────────────────
+@app.route("/score-assessment", methods=["POST"])
+def score_api():
+    """
+    Request:
+      {
+        "name":"민준", "age":6, "gender":"남",
+        "topic":"편식",
+        "answers":[1..4] * 40  // 라벨/문자도 허용
+      }
+    Response:
+      {
+        "ok": true,
+        "input": {...},
+        "cdps": {
+          "answers_raw":[...40],
+          "answers_scored":[...40],
+          "domain_avg":{"SOC":3.2,...},
+          "code":"A1-B0-C1-D0-E1-F0",
+          "bits":[...],
+          "axes":["SOC","EMO","CON","AUT","RES","HAB"],
+          "threshold":2.5,
+          "focus":[{"key":"HAB","score":2.31},{"key":"CON","score":2.44}],
+          "rationale":"선택 주제: ...\n검사 결과 기반 ..."
+        }
+      }
+    """
+    try:
+        payload = request.get_json(force=True) or {}
+        name   = str(payload.get("name","")).strip() or "아이"
+        age    = int(str(payload.get("age","6")).strip())
+        gender = str(payload.get("gender","아이")).strip()
+        topic  = str(payload.get("topic","")).strip() or "생활 습관"
+        answers = payload.get("answers", [])
+
+        raw, scored = score_answers(answers)
+        avgs = domain_averages(scored)
+        code, bits = make_code(avgs)
+        focus = select_focus_domains(avgs, k=2)
+        rationale = build_rationale_text(topic, focus)
+
+        return jsonify({
+            "ok": True,
+            "input": {"name":name,"age":age,"gender":gender,"topic":topic},
+            "cdps": {
+                "answers_raw": raw,
+                "answers_scored": scored,
+                "domain_avg": avgs,
+                "code": code,
+                "bits": bits,
+                "axes": CODE_AXES,
+                "threshold": BIN_THRESHOLD,
+                "focus": [{"key":k,"score":s} for k,s in focus],
+                "rationale": rationale
+            }
+        })
+    except Exception as e:
+        logger.exception("score-assessment error")
+        return jsonify({"ok":False,"error":str(e)}), 400
+
+
+# ─────────────────────────────────
+# 라우트: /generate-story  (검사 근거 주입)
 # ─────────────────────────────────
 @app.route("/generate-story", methods=["POST"])
 def generate_story():
@@ -417,12 +573,37 @@ def generate_story():
     gender_norm = normalize_gender(gender_raw)
     goal = pick_goal(payload)
 
+    # 선택: 클라이언트가 /score-assessment 결과를 그대로 넘겨줄 수 있음
+    cdps = payload.get("cdps") or {}
+    domain_avg = cdps.get("domain_avg")
+    cdps_code  = cdps.get("code")
+    focus_arr  = cdps.get("focus") or []  # [{"key":"HAB","score":2.3}, ...]
+    focus_keys = [f.get("key") for f in focus_arr if isinstance(f, dict) and f.get("key")]
+    rationale  = cdps.get("rationale")
+
+    # 만약 rationale 미제공이면 서버에서 즉석 계산(강건성)
+    if not rationale and isinstance(domain_avg, dict):
+        focus = select_focus_domains(domain_avg, k=2)
+        rationale = build_rationale_text(goal, focus)
+        focus_keys = [k for k,_ in focus]
+
     logger.info(
         f"[generate-story] name={name} age={age} gender_raw={gender_raw} "
-        f"gender_norm={gender_norm} goal={goal}"
+        f"gender_norm={gender_norm} goal={goal} code={cdps_code} focus={focus_keys}"
     )
 
-    story_dict = call_gpt_story(name, age, gender_norm, goal)
+    story_dict = call_gpt_story(
+        name, age, gender_norm, goal,
+        cdps_code=cdps_code,
+        rationale_text=rationale,
+        focus_keys=focus_keys
+    )
+
+    # 프론트 표시용 메타
+    story_dict.setdefault("meta", {})
+    story_dict["meta"]["rationale"] = rationale or ""
+    story_dict["meta"]["focus_domains"] = focus_keys or []
+
     return jsonify(story_dict)
 
 
